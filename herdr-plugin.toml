@@ -1,0 +1,57 @@
+id = "local.priority-plus"
+name = "Priority+"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Lifecycle-derived reply badge and client-local Priority+ sorting"
+platforms = ["linux"]
+
+[[startup]]
+command = ["python3", "priority_plus.py", "startup"]
+
+[[actions]]
+id = "enable"
+title = "Priority+ einschalten"
+command = ["python3", "priority_plus.py", "enable"]
+
+[[actions]]
+id = "disable"
+title = "Priority+ Sortierung ausschalten"
+command = ["python3", "priority_plus.py", "disable"]
+
+[[actions]]
+id = "toggle"
+title = "Priority+ Sortierung umschalten"
+command = ["python3", "priority_plus.py", "toggle"]
+
+[[actions]]
+id = "cleanup"
+title = "Priority+ Metadaten entfernen (vor Unlink)"
+command = ["python3", "priority_plus.py", "cleanup"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "pane.moved"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "pane.closed"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "pane.exited"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "tab.closed"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "workspace.closed"
+command = ["python3", "priority_plus.py", "sync"]

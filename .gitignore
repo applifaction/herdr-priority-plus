@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pi-subagents/
+test-artifacts/
+
+# Local implementation notes; not part of the public plugin.
+/PLAN.md
