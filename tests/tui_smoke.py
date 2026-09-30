@@ -42,7 +42,7 @@ status_indicators = "symbols"
 [ui.sound]
 enabled = false
 [ui.sidebar.agents]
-rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉ Awaiting reply", fg = "#b58900", bold = true }, { contains = "", hide = true }] }]]
+rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳ Subagent working", fg = "#268bd2", bold = true }, { equals = "◉ Awaiting reply", fg = "#b58900", bold = true }, { contains = "", hide = true }] }]]
 ''')
 
     def rpc(method, params=None):
@@ -107,16 +107,28 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉
         return lines
 
     def fixture_order(lines):
-        return [name for line in lines for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'IDLE'] if name in line]
+        names = ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE', 'WAITING']
+        return [name for line in lines for name in names if name in line]
 
     def report(pane, state):
         return rpc('pane.report_agent', {'pane_id': pane, 'source': 'test:priority-plus', 'agent': 'pi', 'state': state})
 
     def action(name):
+        before = {entry['log_id'] for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']}
         done = subprocess.run([herdr, 'plugin', 'action', 'invoke', 'local.priority-plus.'+name], env=env, capture_output=True, text=True, timeout=8)
         if done.returncode:
             raise RuntimeError(done.stderr)
-        pump(1)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            pump(.1)
+            fresh = [entry for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']
+                     if entry['log_id'] not in before and entry.get('action_id') == name]
+            if any(entry['status'] == 'succeeded' for entry in fresh):
+                return
+            failed = next((entry for entry in fresh if entry['status'] == 'failed'), None)
+            if failed:
+                raise RuntimeError(failed.get('stderr') or f'{name} failed')
+        raise RuntimeError(f'timed out waiting for {name}')
 
     try:
         with (root/'server.log').open('wb') as log:
@@ -133,10 +145,14 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉
             first = rpc('workspace.create', {'cwd': temp, 'label': 'fixture', 'focus': True})
             ws = first['workspace']['workspace_id']
             panes = {}
-            for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'IDLE']:
+            for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE']:
                 created = rpc('tab.create', {'workspace_id': ws, 'label': name, 'cwd': temp, 'focus': False})
                 panes[name] = created['root_pane']['pane_id']
                 report(panes[name], 'idle')
+            wait_created = rpc('workspace.create', {'cwd': temp, 'label': 'WAIT/FIXTURE', 'focus': False})
+            panes['WAITING'] = wait_created['root_pane']['pane_id']
+            rpc('tab.rename', {'tab_id': wait_created['root_pane']['tab_id'], 'label': 'WAITING'})
+            report(panes['WAITING'], 'idle')
             client = subprocess.Popen([herdr], env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
             pump(1)
             os.write(master, b'\x1b[I')  # report focused OUTER test terminal only
@@ -145,27 +161,47 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉
                 action('enable')
             else:
                 rpc('agent.view.set', {'source': 'test:priority-plus', 'label': 'Priority+', 'sort': [{'field': {'token': 'pp_rank'}, 'order': 'desc'}, {'field': 'seen', 'order': 'asc'}, {'field': 'state_change_seq', 'order': 'desc'}]})
-            for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING']:
+            for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'WAITING']:
                 report(panes[name], 'working')
             pump(.8)
             report(panes['BLOCKED'], 'blocked')
             report(panes['REVIEWED'], 'idle')
+            report(panes['SUBAGENT'], 'idle')
+            report(panes['WAITING'], 'idle')
+            rpc('pane.focus', {'pane_id': panes['WAITING']})
             pump(.25)
             report(panes['UNREAD'], 'idle')
-            if not args.plugin:
-                for name, rank in [('BLOCKED', '5'), ('UNREAD', '4'), ('REVIEWED', '4'), ('RUNNING', '2'), ('IDLE', '1')]:
+            summary = '⏳ 1 subagent (worker)'
+            if args.plugin:
+                rpc('pane.report_metadata', {'pane_id': panes['SUBAGENT'], 'source': 'pi-subagents:herdr',
+                    'tokens': {'summary': summary},
+                    'state_labels': {state: summary for state in ['idle', 'done', 'working']}})
+                pump(1)
+            else:
+                for name, rank in [('BLOCKED', '5'), ('UNREAD', '4'), ('REVIEWED', '4'),
+                                   ('RUNNING', '3'), ('SUBAGENT', '2'), ('IDLE', '1'), ('WAITING', '1')]:
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': {'pp_rank': rank}}
                     if name in ['UNREAD', 'REVIEWED']:
                         params['state_labels'] = {'idle': '◉ Awaiting reply'}
+                    elif name == 'SUBAGENT':
+                        params['state_labels'] = {'idle': '⏳ Subagent working'}
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
-            assert fixture_order(lines) == ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'IDLE'], fixture_order(lines)
+            expected_prefix = ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT']
+            order = fixture_order(lines)
+            assert order[:5] == expected_prefix, order
+            assert set(order[5:]) == {'IDLE', 'WAITING'}, order
             assert not any('Awaiting reply' in line for line in lines), 'Badge must stay hidden for unseen completions'
+            assert sum('⏳ Subagent working' in line for line in lines) == 1
+            waiting_row = next(i for i, line in enumerate(lines) if 'WAITING' in line)
+            assert waiting_row + 1 >= len(lines) or 'Awaiting reply' not in lines[waiting_row + 1]
             row = next(i+1 for i, line in enumerate(lines) if 'REVIEWED' in line)
             col = lines[row-1].index('REVIEWED')+2
             os.write(master, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
             lines = capture('after_review_click')
-            assert fixture_order(lines) == ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'IDLE'], fixture_order(lines)
+            order = fixture_order(lines)
+            assert order[:5] == expected_prefix, order
+            assert set(order[5:]) == {'IDLE', 'WAITING'}, order
             assert sum('◉ Awaiting reply' in line for line in lines) == 1, 'Exactly the reviewed completion needs a badge'
             rpc('pane.send_text', {'pane_id': panes['REVIEWED'], 'text': 'draft-not-submitted'})
             lines = capture('after_typing_only')
@@ -183,6 +219,7 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉
                 action('enable')
                 lines = capture('priority_plus_enabled')
                 assert any('Priority+' in line for line in lines)
+            assert b'38;2;38;139;210' in raw, 'Subagent status must render in configured blue'
             results['passed'] = True
     finally:
         # ONLY the server spawned with our isolated environment is stopped.

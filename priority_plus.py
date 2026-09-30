@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import struct
 import sys
@@ -17,6 +18,9 @@ PLUGIN = "local.priority-plus"
 SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
 LABEL = "◉ Awaiting reply"
+SUBAGENT_LABEL = "⏳ Subagent working"
+SUBAGENT_STATES = ("idle", "done", "working")
+SUBAGENT_SUMMARY = re.compile(r"^⏳ [1-9][0-9]* subagents?(?: \([^()\n]*\))?$")
 VIEW = {
     "source": SOURCE,
     "label": "Priority+",
@@ -151,7 +155,9 @@ def load_state(path, boot):
             if (not isinstance(record, dict) or not isinstance(record.get("identity"), list)
                     or type(record.get("seq")) is not int
                     or type(record.get("pending")) is not bool
-                    or not isinstance(record.get("status"), str)):
+                    or not isinstance(record.get("status"), str)
+                    or ("subagent" in record and type(record["subagent"]) is not bool)
+                    or ("waiting" in record and type(record["waiting"]) is not bool)):
                 raise RuntimeError("Invalid Priority+ agent record")
         if state.get("boot") != boot:
             state["agents"] = {}  # Never compare lifecycle counters across boots.
@@ -160,7 +166,16 @@ def load_state(path, boot):
     return {"version": 1, "boot": boot, "enabled": True, "cleaned": False, "agents": {}}
 
 
-def observe(agent, previous=None):
+def is_wait_workspace(label):
+    return isinstance(label, str) and label.startswith("WAIT")
+
+
+def has_active_subagents(agent):
+    summary = (agent.get("tokens") or {}).get("summary")
+    return isinstance(summary, str) and SUBAGENT_SUMMARY.fullmatch(summary) is not None
+
+
+def observe(agent, previous=None, waiting=False):
     session = agent.get("agent_session") or {}
     identity = [agent.get("agent"), session.get("source"), session.get("agent"),
                 session.get("kind"), session.get("value")]
@@ -172,17 +187,23 @@ def observe(agent, previous=None):
     if status == "idle" and previous:
         pending = (previous["pending"] or previous["status"] in ("working", "blocked")
                    or seq > previous["seq"])
-    # Working/blocked/unknown are not a completed run. Blocked ranks first.
+    # Working/blocked/unknown are not a completed run. Keep the underlying
+    # pending flag while a child runs so Awaiting reply can return afterwards.
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
+            "subagent": has_active_subagents(agent), "waiting": waiting,
             "applied": previous.get("applied") if previous else None}
 
 
 def rank(record):
     if record["status"] == "blocked":
-        return "4"
+        return "5"
+    if record.get("subagent"):
+        return "2"
+    if record.get("waiting"):
+        return "3" if record["status"] == "working" else "1"
     if record["pending"]:
-        return "3"
-    return {"working": "2", "idle": "1"}.get(record["status"], "0")
+        return "4"
+    return {"working": "3", "idle": "1"}.get(record["status"], "0")
 
 
 def metadata(client, pane_id, **fields):
@@ -204,8 +225,17 @@ def clear_pane(client, pane):
 
 def reconcile(client, state, path):
     agents = client.call("agent.list")["agents"]
+    wait_workspaces = {
+        workspace["workspace_id"]
+        for workspace in client.call("workspace.list")["workspaces"]
+        if is_wait_workspace(workspace.get("label"))
+    }
     previous = state["agents"]
-    records = {a["terminal_id"]: observe(a, previous.get(a["terminal_id"])) for a in agents}
+    records = {
+        agent["terminal_id"]: observe(
+            agent, previous.get(agent["terminal_id"]), agent.get("workspace_id") in wait_workspaces)
+        for agent in agents
+    }
     # Save observations BEFORE side effects, so a killed hook cannot lose a
     # working -> idle transition. 'applied' is acknowledged only after success.
     state["agents"] = {**previous, **records}
@@ -224,12 +254,23 @@ def reconcile(client, state, path):
             fields["tokens"] = {TOKEN: desired}
         # Cache the emitted text, not just a boolean: upgrades can refresh
         # an existing badge without resetting its pending completion.
-        label_state = LABEL if record["pending"] else False
-        if record["applied"] != label_state:
-            if record["pending"]:
-                fields["state_labels"] = {"idle": LABEL}
-            else:
-                fields["clear_state_labels"] = True
+        if record["subagent"]:
+            label_state = SUBAGENT_LABEL
+            labels = agent.get("state_labels") or {}
+            # pi-subagents refreshes its dynamic count label periodically. Its
+            # status-label change triggers reconciliation so this stable label wins.
+            if (record["applied"] != label_state
+                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
+                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
+        else:
+            label_state = LABEL if record["pending"] and not record["waiting"] else False
+            labels = agent.get("state_labels") or {}
+            stale_badge = not label_state and labels.get("idle") == LABEL
+            if record["applied"] != label_state or stale_badge:
+                if label_state:
+                    fields["state_labels"] = {"idle": LABEL}
+                else:
+                    fields["clear_state_labels"] = True
         if fields:
             if not metadata(client, agent["pane_id"], **fields):
                 continue

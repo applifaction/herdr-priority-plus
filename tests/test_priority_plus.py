@@ -14,7 +14,7 @@ import priority_plus as pp
 
 
 def agent(status="idle", seq=1, **fields):
-    return {"terminal_id": "term-1", "pane_id": "w1:p1", "agent": "pi",
+    return {"terminal_id": "term-1", "pane_id": "w1:p1", "workspace_id": "w1", "agent": "pi",
             "agent_status": status, "state_change_seq": seq, "tokens": {}, **fields}
 
 
@@ -24,6 +24,7 @@ class FakeClient:
         self.calls = []
         self.fail = None
         self.panes = []
+        self.workspaces = [{"workspace_id": "w1", "label": "main"}]
 
     def call(self, method, params=None):
         self.calls.append((method, copy.deepcopy(params)))
@@ -31,6 +32,8 @@ class FakeClient:
             return {"agents": copy.deepcopy(self.agents)}
         if method == "pane.list":
             return {"panes": self.panes}
+        if method == "workspace.list":
+            return {"workspaces": copy.deepcopy(self.workspaces)}
         if self.fail:
             raise pp.ApiError(self.fail)
         if method == "pane.report_metadata":
@@ -41,6 +44,10 @@ class FakeClient:
                             a["tokens"].pop(key, None)
                         else:
                             a["tokens"][key] = value
+                    if params.get("clear_state_labels"):
+                        a.pop("state_labels", None)
+                    if "state_labels" in params:
+                        a["state_labels"] = copy.deepcopy(params["state_labels"])
         return {}
 
 
@@ -53,16 +60,21 @@ def increment(directory, sock):
 
 
 class LifecycleTests(unittest.TestCase):
-    def test_badge_label_is_english(self):
+    def test_badge_labels_are_english(self):
         self.assertEqual(pp.LABEL, "◉ Awaiting reply")
+        self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
 
     def test_bootstrap_and_all_ranks(self):
-        expected = {"blocked": "4", "done": "3", "working": "2", "idle": "1", "unknown": "0"}
-        for status, rank in expected.items():
+        expected = {"blocked": "5", "done": "4", "working": "3", "idle": "1", "unknown": "0"}
+        for status, expected_rank in expected.items():
             with self.subTest(status=status):
                 record = pp.observe(agent(status))
-                self.assertEqual(pp.rank(record), rank)
+                self.assertEqual(pp.rank(record), expected_rank)
                 self.assertEqual(record["pending"], status == "done")
+                self.assertFalse(record["subagent"])
+        record = pp.observe(agent("idle", tokens={"summary": "⏳ 2 subagents (worker, reviewer)"}))
+        self.assertTrue(record["subagent"])
+        self.assertEqual(pp.rank(record), "2")
 
     def test_transitions_and_review(self):
         record = None
@@ -73,12 +85,51 @@ class LifecycleTests(unittest.TestCase):
                                      ("unknown", 7, False)]:
             record = pp.observe(agent(status, seq), record)
             self.assertEqual(record["pending"], pending, (status, seq))
-        self.assertEqual(pp.rank(pp.observe(agent("idle", 2), pp.observe(agent("working", 1)))), "3")
+        self.assertEqual(pp.rank(pp.observe(agent("idle", 2), pp.observe(agent("working", 1)))), "4")
 
     def test_skipped_work_and_metadata_only(self):
         first = pp.observe(agent("idle", 1))
         self.assertFalse(pp.observe(agent("idle", 1, revision=900), first)["pending"])
         self.assertTrue(pp.observe(agent("idle", 3), first)["pending"])
+
+    def test_wait_workspace_detection_is_case_sensitive_prefix(self):
+        for label in ("WAIT", "WAIT/MP", "WAITING", "WAIT-list"):
+            with self.subTest(label=label):
+                self.assertTrue(pp.is_wait_workspace(label))
+        for label in (None, "", "wait/MP", " WAIT/MP", "AWAIT/MP"):
+            with self.subTest(label=label):
+                self.assertFalse(pp.is_wait_workspace(label))
+
+    def test_wait_workspace_parks_nonactive_states(self):
+        for status, expected_rank in (("idle", "1"), ("done", "1"), ("unknown", "1"),
+                                      ("working", "3"), ("blocked", "5")):
+            with self.subTest(status=status):
+                self.assertEqual(pp.rank(pp.observe(agent(status), waiting=True)), expected_rank)
+        active = pp.observe(agent("done", tokens={"summary": "⏳ 1 subagent"}), waiting=True)
+        self.assertEqual(pp.rank(active), "2")
+
+    def test_subagent_summary_detection_and_pending_preservation(self):
+        for summary in ("⏳ 1 subagent", "⏳ 2 subagents (worker, reviewer)"):
+            with self.subTest(summary=summary):
+                self.assertTrue(pp.has_active_subagents(agent(tokens={"summary": summary})))
+        for summary in (None, "", "⏳ 0 subagents", "1 subagent", "⏳ subagent", "unrelated"):
+            with self.subTest(summary=summary):
+                tokens = {} if summary is None else {"summary": summary}
+                self.assertFalse(pp.has_active_subagents(agent(tokens=tokens)))
+
+        completed = pp.observe(agent("done", 4))
+        delegated = pp.observe(agent("idle", 4, tokens={"summary": "⏳ 1 subagent (worker)"}), completed)
+        self.assertTrue(delegated["pending"])
+        self.assertTrue(delegated["subagent"])
+        self.assertEqual(pp.rank(delegated), "2")
+        resumed = pp.observe(agent("idle", 4), delegated)
+        self.assertTrue(resumed["pending"])
+        self.assertFalse(resumed["subagent"])
+        self.assertEqual(pp.rank(resumed), "4")
+
+        plain = pp.observe(agent("idle", 1))
+        delegated = pp.observe(agent("idle", 1, tokens={"summary": "⏳ 1 subagent"}), plain)
+        self.assertFalse(pp.observe(agent("idle", 1), delegated)["pending"])
 
     def test_focus_drafts_and_moves_are_not_identity_or_seen(self):
         first = pp.observe(agent("done", 3))
@@ -109,10 +160,10 @@ class LifecycleTests(unittest.TestCase):
             {"field": "seen", "order": "asc"},
             {"field": "state_change_seq", "order": "desc"}])
         rows = [("blocked", False), ("done", False), ("idle", True), ("working", True)]
-        facts = [(pp.rank(pp.observe(agent(status), pp.observe(agent("done"))) ), seen)
+        facts = [(pp.rank(pp.observe(agent(status), pp.observe(agent("done")))), seen)
                  for status, seen in rows]
+        facts.append((pp.rank(pp.observe(agent("idle", tokens={"summary": "⏳ 1 subagent"}))), True))
         self.assertEqual(sorted(facts, key=lambda r: (-int(r[0]), r[1])), facts)
-
 
 class PersistenceTests(unittest.TestCase):
     def test_concurrent_writes_private_atomic_and_socket_scoped(self):
@@ -203,6 +254,65 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(set(fields["tokens"]), {pp.TOKEN})
         self.assertEqual(self.client.agents[0]["tokens"]["foreign"], "keep")
 
+    def test_active_subagent_ranks_below_working_and_reasserts_its_label(self):
+        completed = pp.observe(agent("done", 1))
+        self.state["agents"]["term-1"] = completed
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={"summary": "⏳ 1 subagent (worker)", pp.TOKEN: "4"},
+            state_labels={"idle": "⏳ 1 subagent (worker)"},
+        )
+        self.sync()
+        self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "2")
+        self.assertEqual(self.client.agents[0]["state_labels"], {
+            "idle": pp.SUBAGENT_LABEL,
+            "done": pp.SUBAGENT_LABEL,
+            "working": pp.SUBAGENT_LABEL,
+        })
+        self.assertTrue(self.state["agents"]["term-1"]["pending"])
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(self.writes(), [])
+
+        # The pi-subagents bridge refreshes its own dynamic label. Priority+
+        # reasserts the stable user-facing label without touching its token.
+        self.client.agents[0]["state_labels"] = {"idle": "⏳ 1 subagent (worker)"}
+        self.sync()
+        self.assertEqual(self.writes()[-1]["state_labels"]["idle"], pp.SUBAGENT_LABEL)
+        self.client.agents[0]["tokens"].pop("summary")
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "4")
+        self.assertEqual(self.client.agents[0]["state_labels"], {"idle": pp.LABEL})
+
+    def test_wait_workspace_suppresses_and_restores_pending_presentation(self):
+        completed = pp.observe(agent("done", 2))
+        # Recover even if an older/buggy run persisted a false acknowledgement
+        # while its Awaiting reply contribution was still visible.
+        completed["applied"] = False
+        self.state["agents"]["term-1"] = completed
+        self.client.workspaces = [{"workspace_id": "wait", "label": "WAIT/MP"}]
+        self.client.agents[0] = agent(
+            "idle", 2, workspace_id="wait", tokens={pp.TOKEN: "4"},
+            state_labels={"idle": pp.LABEL},
+        )
+        self.sync()
+        record = self.state["agents"]["term-1"]
+        self.assertTrue(record["pending"])
+        self.assertTrue(record["waiting"])
+        self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "1")
+        self.assertNotIn("state_labels", self.client.agents[0])
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(self.writes(), [])
+
+        self.client.workspaces[0]["label"] = "MP MAIN"
+        self.client.calls.clear()
+        self.sync()
+        self.assertFalse(self.state["agents"]["term-1"]["waiting"])
+        self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "4")
+        self.assertEqual(self.client.agents[0]["state_labels"], {"idle": pp.LABEL})
+
     def test_upgrade_refreshes_applied_label_without_losing_completion(self):
         self.sync()
         self.client.agents[0].update(agent_status="idle", state_change_seq=2)
@@ -222,7 +332,7 @@ class ReconciliationTests(unittest.TestCase):
                 self.assertTrue(record["pending"])
                 self.assertEqual(record["seq"], 2)
                 self.assertEqual(record["applied"], "◉ Awaiting reply")
-                self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "3")
+                self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "4")
                 self.client.calls.clear()
                 self.sync()
                 self.assertEqual(self.writes(), [])
@@ -341,6 +451,8 @@ class SocketTests(unittest.TestCase):
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
+        self.assertIn("tab.moved", hooks)
+        self.assertIn("workspace.renamed", hooks)
         self.assertTrue(hooks.isdisjoint({"pane.updated", "pane.focused", "pane.output"}))
         self.assertTrue(all(e["command"] == ["python3", "priority_plus.py", "sync"]
                             for e in manifest["events"]))

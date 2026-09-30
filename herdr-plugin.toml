@@ -1,8 +1,8 @@
 id = "local.priority-plus"
 name = "Priority+"
-version = "0.1.1"
+version = "0.1.2"
 min_herdr_version = "0.9.1"
-description = "Lifecycle-derived reply badge and client-local Priority+ sorting"
+description = "Reply, subagent, and WAIT-aware client-local Priority+ sorting"
 platforms = ["linux"]
 
 [[startup]]
@@ -49,7 +49,15 @@ on = "pane.exited"
 command = ["python3", "priority_plus.py", "sync"]
 
 [[events]]
+on = "tab.moved"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
 on = "tab.closed"
+command = ["python3", "priority_plus.py", "sync"]
+
+[[events]]
+on = "workspace.renamed"
 command = ["python3", "priority_plus.py", "sync"]
 
 [[events]]

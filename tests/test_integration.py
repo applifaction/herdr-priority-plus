@@ -32,8 +32,8 @@ class RealHerdrTests(unittest.TestCase):
             config.write_text('[update]\nversion_check = false\nmanifest_check = false\n'
                               '[ui.sidebar.agents]\nrows = [\n'
                               '  ["state_icon", "agent", "workspace"],\n'
-                              '  [{ token = "state_text", rules = [{ equals = "◉ Awaiting reply" }, '
-                              '{ contains = "", hide = true }] }],\n]\n')
+                              '  [{ token = "state_text", rules = [{ equals = "⏳ Subagent working" }, '
+                              '{ equals = "◉ Awaiting reply" }, { contains = "", hide = true }] }],\n]\n')
             env.update(HERDR_SOCKET_PATH=str(base / "api.sock"),
                        HERDR_CLIENT_SOCKET_PATH=str(base / "client.sock"),
                        HERDR_CONFIG_PATH=str(config), SHELL="/bin/sh", TERM="xterm-256color")
@@ -113,32 +113,77 @@ class RealHerdrTests(unittest.TestCase):
                     blocked = fixture("blocked")
                     plain = fixture("plain-idle")
                     working = fixture("working")
+                    subagent = fixture("subagent")
+                    waiting = fixture("WAIT/fixture")
                     report(plain, "idle")
                     expect_rank(plain, "1")
                     self.assertNotEqual(get(plain).get("state_labels", {}).get("idle"), pp.LABEL)
                     report(working, "working")
-                    expect_rank(working, "2")
+                    expect_rank(working, "3")
                     report(blocked, "blocked")
-                    expect_rank(blocked, "4")
+                    expect_rank(blocked, "5")
                     for pane in (focused, background):
                         call("pane.report_metadata", pane_id=pane, source="test:foreign",
                              title="foreign title", state_labels={"idle": "foreign idle", "working": "foreign work"},
                              tokens={"foreign": "keep"})
                         report(pane, "working")
-                        expect_rank(pane, "2")
-                        report(pane, "idle")
                         expect_rank(pane, "3")
+                        report(pane, "idle")
+                        expect_rank(pane, "4")
                         wait(lambda: get(pane).get("state_labels", {}).get("idle") == pp.LABEL, "pending badge")
                         self.assertEqual(get(pane)["tokens"]["foreign"], "keep")
                         self.assertEqual(get(pane)["title"], "foreign title")
                         self.assertEqual(get(pane)["state_labels"]["working"], "foreign work")
                     self.assertEqual(get(background)["agent_status"], "done")
-                    evidence.append("background done and focused completion both rank 3; blocked=4, working=2, plain idle=1")
+                    evidence.append("background done and focused completion both rank 4; blocked=5, working=3, plain idle=1")
+                    report(subagent, "working")
+                    expect_rank(subagent, "3")
+                    report(subagent, "idle")
+                    expect_rank(subagent, "4")
+                    subagent_summary = "⏳ 1 subagent (worker)"
+                    call("pane.report_metadata", pane_id=subagent, source="pi-subagents:herdr",
+                         state_labels={state: subagent_summary for state in pp.SUBAGENT_STATES},
+                         tokens={"summary": subagent_summary})
+                    expect_rank(subagent, "2")
+                    wait(lambda: get(subagent).get("state_labels", {}).get("idle") == pp.SUBAGENT_LABEL,
+                         "stable subagent label")
+                    # A pi-subagents refresh temporarily becomes the latest label;
+                    # the resulting status-label change must make Priority+ win again.
+                    call("pane.report_metadata", pane_id=subagent, source="pi-subagents:herdr",
+                         state_labels={state: subagent_summary for state in pp.SUBAGENT_STATES},
+                         tokens={"summary": subagent_summary})
+                    wait(lambda: get(subagent).get("state_labels", {}).get("idle") == pp.SUBAGENT_LABEL,
+                         "subagent label after refresh")
+                    call("pane.report_metadata", pane_id=subagent, source="pi-subagents:herdr",
+                         clear_state_labels=True, tokens={"summary": None})
+                    expect_rank(subagent, "4")
+                    wait(lambda: get(subagent).get("state_labels", {}).get("idle") == pp.LABEL,
+                         "awaiting label restored after subagent")
+                    evidence.append("active subagent rank 2 sits below working rank 3 and restores pending rank 4")
+                    report(waiting, "working")
+                    expect_rank(waiting, "3")
+                    report(waiting, "idle")
+                    expect_rank(waiting, "1")
+                    call("pane.focus", pane_id=waiting)
+                    wait(lambda: get(waiting)["agent_status"] == "idle", "review WAIT result")
+                    expect_rank(waiting, "1")
+                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") != pp.LABEL,
+                         "WAIT suppresses awaiting label")
+                    waiting_workspace = get(waiting)["workspace_id"]
+                    call("workspace.rename", workspace_id=waiting_workspace, label="resumed")
+                    expect_rank(waiting, "4")
+                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") == pp.LABEL,
+                         "leaving WAIT restores awaiting label")
+                    call("workspace.rename", workspace_id=waiting_workspace, label="WAIT/fixture")
+                    expect_rank(waiting, "1")
+                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") != pp.LABEL,
+                         "returning to WAIT clears awaiting label")
+                    evidence.append("WAIT workspace keeps pending history but presents reviewed sessions as ordinary idle")
                     call("pane.focus", pane_id=background)
                     wait(lambda: get(background)["agent_status"] == "idle", "focus native review")
                     call("pane.send_text", pane_id=background, text="draft-not-submitted")
                     time.sleep(0.15)
-                    self.assertEqual(get(background)["tokens"][pp.TOKEN], "3")
+                    self.assertEqual(get(background)["tokens"][pp.TOKEN], "4")
                     self.assertEqual(get(background)["state_labels"]["idle"], pp.LABEL)
                     evidence.append("pane.focus and draft typing preserve pending label/rank")
                     terminal = get(background)["terminal_id"]
@@ -146,14 +191,14 @@ class RealHerdrTests(unittest.TestCase):
                                  destination={"type": "new_workspace", "label": "moved"}, focus=True)["move_result"]
                     self.assertTrue(moved["changed"])
                     background = moved["pane"]["pane_id"]
-                    expect_rank(background, "3")
+                    expect_rank(background, "4")
                     self.assertEqual(get(background)["terminal_id"], terminal)
                     self.assertEqual(get(background)["state_labels"]["idle"], pp.LABEL)
                     evidence.append("pane move preserves completion by terminal identity")
                     # Other plugins' views are not reclaimed by sync or cleared by disable.
                     call("agent.view.set", source="test:foreign", label="foreign", sort=[])
                     report(working, "blocked")
-                    expect_rank(working, "4")
+                    expect_rank(working, "5")
                     action("disable")
                     view = call("agent.view.clear", source=pp.SOURCE)
                     self.assertTrue(view["active"])
@@ -167,7 +212,7 @@ class RealHerdrTests(unittest.TestCase):
                     action("toggle")
                     evidence.append("disable is source-scoped; events preserve foreign view; enable/toggle install Priority+")
                     report(background, "working")
-                    expect_rank(background, "2")
+                    expect_rank(background, "3")
                     wait(lambda: get(background).get("state_labels", {}).get("idle") == "foreign idle",
                          "new work clears only our label")
                     self.assertEqual(get(background)["tokens"]["foreign"], "keep")
@@ -180,7 +225,7 @@ class RealHerdrTests(unittest.TestCase):
                     self.assertEqual(failed, [])
                     evidence.append("all manifest hooks converged without failures")
                     action("cleanup")
-                    for pane in (focused, background, blocked, plain, working):
+                    for pane in (focused, background, blocked, plain, working, subagent, waiting):
                         self.assertNotIn(pp.TOKEN, get(pane).get("tokens", {}))
                         self.assertNotEqual(get(pane).get("state_labels", {}).get("idle"), pp.LABEL)
                     self.assertEqual(get(focused)["state_labels"]["idle"], "foreign idle")
@@ -190,7 +235,7 @@ class RealHerdrTests(unittest.TestCase):
                     self.assertNotIn(pp.TOKEN, get(blocked).get("tokens", {}))
                     self.assertFalse(call("agent.view.clear", source="test:not-owner")["active"])
                     action("enable")
-                    expect_rank(blocked, "2")
+                    expect_rank(blocked, "3")
                     evidence.append("cleanup removes metadata and quiesces hooks; enable resumes")
                     (ARTIFACTS / "isolated-plugin-logs-before-restart.json").write_text(json.dumps({"logs": logs()}, indent=2))
                     state_files = list(base.rglob("state.json"))
