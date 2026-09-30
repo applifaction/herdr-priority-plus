@@ -53,6 +53,9 @@ def increment(directory, sock):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_badge_label_is_english(self):
+        self.assertEqual(pp.LABEL, "◉ Awaiting reply")
+
     def test_bootstrap_and_all_ranks(self):
         expected = {"blocked": "4", "done": "3", "working": "2", "idle": "1", "unknown": "0"}
         for status, rank in expected.items():
@@ -200,6 +203,30 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(set(fields["tokens"]), {pp.TOKEN})
         self.assertEqual(self.client.agents[0]["tokens"]["foreign"], "keep")
 
+    def test_upgrade_refreshes_applied_label_without_losing_completion(self):
+        self.sync()
+        self.client.agents[0].update(agent_status="idle", state_change_seq=2)
+        self.sync()
+        for old_applied in (True, "◉ Antwort offen"):
+            with self.subTest(old_applied=old_applied):
+                self.state["agents"]["term-1"]["applied"] = old_applied
+                pp.save_state(self.path, self.state)
+                self.state = pp.load_state(self.path, "boot")
+                self.client.calls.clear()
+                self.sync()
+                self.assertEqual(self.writes(), [{
+                    "pane_id": "w1:p1", "source": pp.SOURCE,
+                    "state_labels": {"idle": "◉ Awaiting reply"},
+                }])
+                record = self.state["agents"]["term-1"]
+                self.assertTrue(record["pending"])
+                self.assertEqual(record["seq"], 2)
+                self.assertEqual(record["applied"], "◉ Awaiting reply")
+                self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "3")
+                self.client.calls.clear()
+                self.sync()
+                self.assertEqual(self.writes(), [])
+
     def test_disappearance_clear_surviving_terminal_but_not_replacement(self):
         self.sync()
         self.client.panes = [agent(pane_id="w2:p9"), agent(terminal_id="replacement", pane_id="w1:p1")]
@@ -220,7 +247,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(self.state["agents"]["term-1"]["applied"])
         self.client.fail = None
         self.sync()
-        self.assertTrue(self.state["agents"]["term-1"]["applied"])
+        self.assertEqual(self.state["agents"]["term-1"]["applied"], pp.LABEL)
 
     def test_pane_closed_during_write_is_tolerated(self):
         self.client.fail = "pane_not_found"

@@ -1,6 +1,6 @@
 id = "local.priority-plus"
 name = "Priority+"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.9.1"
 description = "Lifecycle-derived reply badge and client-local Priority+ sorting"
 platforms = ["linux"]

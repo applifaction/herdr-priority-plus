@@ -42,7 +42,7 @@ status_indicators = "symbols"
 [ui.sound]
 enabled = false
 [ui.sidebar.agents]
-rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉ Antwort offen", fg = "#b58900", bold = true }, { contains = "", hide = true }] }]]
+rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉ Awaiting reply", fg = "#b58900", bold = true }, { contains = "", hide = true }] }]]
 ''')
 
     def rpc(method, params=None):
@@ -156,25 +156,25 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "◉
                 for name, rank in [('BLOCKED', '5'), ('UNREAD', '4'), ('REVIEWED', '4'), ('RUNNING', '2'), ('IDLE', '1')]:
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': {'pp_rank': rank}}
                     if name in ['UNREAD', 'REVIEWED']:
-                        params['state_labels'] = {'idle': '◉ Antwort offen'}
+                        params['state_labels'] = {'idle': '◉ Awaiting reply'}
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
             assert fixture_order(lines) == ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'IDLE'], fixture_order(lines)
-            assert not any('Antwort offen' in line for line in lines), 'Badge must stay hidden for unseen completions'
+            assert not any('Awaiting reply' in line for line in lines), 'Badge must stay hidden for unseen completions'
             row = next(i+1 for i, line in enumerate(lines) if 'REVIEWED' in line)
             col = lines[row-1].index('REVIEWED')+2
             os.write(master, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
             lines = capture('after_review_click')
             assert fixture_order(lines) == ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'IDLE'], fixture_order(lines)
-            assert sum('◉ Antwort offen' in line for line in lines) == 1, 'Exactly the reviewed completion needs a badge'
+            assert sum('◉ Awaiting reply' in line for line in lines) == 1, 'Exactly the reviewed completion needs a badge'
             rpc('pane.send_text', {'pane_id': panes['REVIEWED'], 'text': 'draft-not-submitted'})
             lines = capture('after_typing_only')
-            assert sum('◉ Antwort offen' in line for line in lines) == 1
+            assert sum('◉ Awaiting reply' in line for line in lines) == 1
             report(panes['REVIEWED'], 'working')
             if not args.plugin:
                 rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '2'}})
             lines = capture('next_working_run')
-            assert not any('Antwort offen' in line for line in lines)
+            assert not any('Awaiting reply' in line for line in lines)
             assert fixture_order(lines)[0:2] == ['BLOCKED', 'UNREAD']
             if args.plugin:
                 action('disable')

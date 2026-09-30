@@ -32,7 +32,7 @@ class RealHerdrTests(unittest.TestCase):
             config.write_text('[update]\nversion_check = false\nmanifest_check = false\n'
                               '[ui.sidebar.agents]\nrows = [\n'
                               '  ["state_icon", "agent", "workspace"],\n'
-                              '  [{ token = "state_text", rules = [{ equals = "◉ Antwort offen" }, '
+                              '  [{ token = "state_text", rules = [{ equals = "◉ Awaiting reply" }, '
                               '{ contains = "", hide = true }] }],\n]\n')
             env.update(HERDR_SOCKET_PATH=str(base / "api.sock"),
                        HERDR_CLIENT_SOCKET_PATH=str(base / "client.sock"),

@@ -16,7 +16,7 @@ import time
 PLUGIN = "local.priority-plus"
 SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
-LABEL = "◉ Antwort offen"
+LABEL = "◉ Awaiting reply"
 VIEW = {
     "source": SOURCE,
     "label": "Priority+",
@@ -222,7 +222,10 @@ def reconcile(client, state, path):
         fields = {}
         if agent.get("tokens", {}).get(TOKEN) != desired:
             fields["tokens"] = {TOKEN: desired}
-        if record["applied"] != record["pending"]:
+        # Cache the emitted text, not just a boolean: upgrades can refresh
+        # an existing badge without resetting its pending completion.
+        label_state = LABEL if record["pending"] else False
+        if record["applied"] != label_state:
             if record["pending"]:
                 fields["state_labels"] = {"idle": LABEL}
             else:
@@ -230,7 +233,7 @@ def reconcile(client, state, path):
         if fields:
             if not metadata(client, agent["pane_id"], **fields):
                 continue
-        record["applied"] = record["pending"]
+        record["applied"] = label_state
     save_state(path, state)
 
 

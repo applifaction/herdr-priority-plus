@@ -24,12 +24,12 @@ agents                  Priority+
 × Blocked
 ✓ Finished, not yet viewed
 ○ Reviewed result
-  ◉ Antwort offen
+  ◉ Awaiting reply
 ◐ Working
 ○ Idle
 ```
 
-The badge currently reads **`◉ Antwort offen`**, German for “awaiting reply”; plugin action titles are also German.
+The badge reads **`◉ Awaiting reply`**. Plugin action titles are currently German.
 
 ## What changes
 
@@ -77,7 +77,7 @@ rows = [
   # Keep your existing rows here. This first row is an example.
   ["state_icon", "machine", "workspace", "tab"],
   [{ token = "state_text", rules = [
-    { equals = "◉ Antwort offen", fg = "#b58900", bold = true },
+    { equals = "◉ Awaiting reply", fg = "#b58900", bold = true },
     { contains = "", hide = true },
   ] }],
 ]
@@ -86,6 +86,9 @@ rows = [
 The first rule shows the badge; the second hides every other status label. When there is no badge, the entire extra row disappears. Do not create a duplicate TOML section. If you use `rows_by_agent` overrides, append the row to the relevant overrides too.
 
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
+
+> [!NOTE]
+> **Upgrading from 0.1.0:** change the old `◉ Antwort offen` value in your sidebar rule to `◉ Awaiting reply`. Existing pending badges refresh on the next hook or `enable` action without losing their completion state. Do not run `cleanup` for this upgrade.
 
 ### 3. Activate Priority+
 
