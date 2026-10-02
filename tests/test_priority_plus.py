@@ -219,6 +219,105 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(len(list(path.parent.iterdir())), 1)
 
 
+class WatcherTests(unittest.TestCase):
+    def pane_event(self, **pane):
+        return {"event": "pane_updated", "data": {"type": "pane_updated", "pane": pane}}
+
+    def test_only_subagent_metadata_edges_require_reconciliation(self):
+        active = self.pane_event(
+            pane_id="w1:p1",
+            tokens={"summary": "⏳ 1 subagent (worker)", pp.TOKEN: "4"},
+            state_labels={"idle": "⏳ 1 subagent (worker)"},
+        )
+        self.assertTrue(pp.needs_reconcile_event(active))
+
+        converged = self.pane_event(
+            pane_id="w1:p1",
+            tokens={"summary": "⏳ 1 subagent (worker)", pp.TOKEN: "2"},
+            state_labels={state: pp.SUBAGENT_LABEL for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(converged))
+
+        completed = self.pane_event(pane_id="w1:p1", tokens={pp.TOKEN: "2"})
+        self.assertTrue(pp.needs_reconcile_event(completed))
+        self.assertFalse(pp.needs_reconcile_event(
+            self.pane_event(pane_id="w1:p1", tokens={pp.TOKEN: "4"})))
+        self.assertFalse(pp.needs_reconcile_event(
+            {"event": "pane_closed", "data": {"type": "pane_closed", "pane_id": "w1:p1"}}))
+        self.assertFalse(pp.needs_reconcile_event({"event": "pane_updated", "data": {}}))
+
+    def test_socket_watcher_subscribes_and_reconciles_metadata_edge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + "/api.sock"
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen()
+            requests = []
+
+            def serve():
+                connection, _ = server.accept()
+                with connection:
+                    request = b""
+                    while not request.endswith(b"\n"):
+                        request += connection.recv(8192)
+                    requests.append(json.loads(request))
+                    event = self.pane_event(
+                        pane_id="w1:p1",
+                        tokens={"summary": "⏳ 1 subagent", pp.TOKEN: "4"},
+                    )
+                    connection.sendall(
+                        (json.dumps({"id": pp.WATCH_REQUEST_ID,
+                                     "result": {"type": "subscription_started"}}) + "\n").encode()
+                        + (json.dumps(event) + "\n").encode())
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            reconciles = []
+            try:
+                pp.watch_events(path, lambda: reconciles.append(True))
+            finally:
+                server.close()
+                thread.join(5)
+            self.assertEqual(requests[0]["method"], "events.subscribe")
+            self.assertEqual(requests[0]["params"], {"subscriptions": [{"type": "pane.updated"}]})
+            self.assertEqual(reconciles, [True])
+
+    def test_cleaned_state_prevents_or_terminates_watcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = directory + "/api.sock"
+            with pp.state_lock(directory, socket_path) as path:
+                state = pp.load_state(path, "boot")
+                state["cleaned"] = True
+                pp.save_state(path, state)
+            with patch("priority_plus.subprocess.Popen") as spawn:
+                pp.ensure_watcher(directory, socket_path)
+                spawn.assert_not_called()
+
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(socket_path)
+            server.listen()
+
+            def serve():
+                connection, _ = server.accept()
+                with connection:
+                    request = b""
+                    while not request.endswith(b"\n"):
+                        request += connection.recv(8192)
+                    connection.sendall((json.dumps({
+                        "id": pp.WATCH_REQUEST_ID,
+                        "result": {"type": "subscription_started"},
+                    }) + "\n").encode())
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            try:
+                pp.watch_events(socket_path, lambda: self.fail("event callback ran"),
+                                on_ready=lambda: False)
+            finally:
+                server.close()
+                thread.join(5)
+
+
 class ReconciliationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -442,7 +541,7 @@ class SocketTests(unittest.TestCase):
         with self.assertRaises(pp.ApiError):
             client.request("agent.list", {})
 
-    def test_manifest_is_one_shot_and_no_focus_or_output_hooks(self):
+    def test_manifest_uses_low_volume_watchdog_hooks(self):
         root = Path(__file__).resolve().parents[1]
         manifest = tomllib.loads((root / "herdr-plugin.toml").read_text())
         self.assertEqual(manifest["id"], pp.PLUGIN)
@@ -456,6 +555,25 @@ class SocketTests(unittest.TestCase):
         self.assertTrue(hooks.isdisjoint({"pane.updated", "pane.focused", "pane.output"}))
         self.assertTrue(all(e["command"] == ["python3", "priority_plus.py", "sync"]
                             for e in manifest["events"]))
+
+    def test_cleaned_hooks_do_not_respawn_watcher_and_cleanup_stops_it(self):
+        environment = {"HERDR_PLUGIN_STATE_DIR": "/state", "HERDR_SOCKET_PATH": "/socket"}
+        with (patch.dict(os.environ, environment, clear=True),
+              patch("priority_plus.run", return_value=False),
+              patch("priority_plus.ensure_watcher") as ensure,
+              patch("priority_plus.stop_watcher") as stop,
+              patch("sys.argv", ["priority_plus.py", "sync"])):
+            self.assertEqual(pp.main(), 0)
+            ensure.assert_not_called()
+            stop.assert_not_called()
+        with (patch.dict(os.environ, environment, clear=True),
+              patch("priority_plus.run", return_value=False),
+              patch("priority_plus.ensure_watcher") as ensure,
+              patch("priority_plus.stop_watcher") as stop,
+              patch("sys.argv", ["priority_plus.py", "cleanup"])):
+            self.assertEqual(pp.main(), 0)
+            ensure.assert_not_called()
+            stop.assert_called_once_with("/state", "/socket")
 
     def test_missing_environment_fails_without_default_socket(self):
         with patch.dict(os.environ, {}, clear=True), patch("sys.argv", ["priority_plus.py", "sync"]):

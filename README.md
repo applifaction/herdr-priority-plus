@@ -94,7 +94,7 @@ The first rule shows the badge; the second hides every other status label. When 
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** from 0.1.0, change the old `◉ Antwort offen` value to `◉ Awaiting reply`. From 0.1.1, add the `⏳ Subagent working` rule shown above. Existing pending badges refresh on the next hook or `enable` action without losing their completion state. Do not run `cleanup` for these upgrades.
+> **Upgrading:** from 0.1.0, change the old `◉ Antwort offen` value to `◉ Awaiting reply`. From 0.1.1, add the `⏳ Subagent working` rule shown above. Version 0.1.3 starts an event watcher so subagent-only metadata changes apply immediately. Invoke `enable` once after updating a linked checkout; existing pending badges refresh without losing their completion state. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -161,17 +161,17 @@ herdr plugin unlink local.priority-plus
 
 Remove the badge row and optional shortcut from your config, then run `herdr server reload-config`.
 
-Cleanup also pauses tracking so queued hooks cannot recreate the metadata. To use the plugin again, invoke `enable`. Herdr retains plugin-owned state after unlinking. Simply disabling or unlinking the plugin does not perform this metadata cleanup.
+Cleanup also stops the event watcher and pauses tracking so queued hooks cannot recreate the metadata or restart the watcher. To use the plugin again, invoke `enable`. Herdr retains plugin-owned state after unlinking. Simply disabling or unlinking the plugin does not perform this metadata cleanup.
 
 ## How it works
 
 Short-lived hooks reconcile Herdr's agent and workspace snapshots and track completion by terminal and agent/session identity. A `pp_rank` metadata token groups pending completions above working agents; Herdr's **client-local `seen`** then separates unread from reviewed results. An `idle` display label supplies the reply badge only after review.
 
-When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. The original completion state remains intact underneath.
+When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. The original completion state remains intact underneath. Because Herdr deliberately excludes high-volume `pane.updated` events from manifest hooks, startup and low-volume hooks supervise one detached per-server socket watcher. It selects only subagent-summary edges and reconciles current snapshots; ordinary pane updates are ignored.
 
 Priority+ joins each agent's `workspace_id` with Herdr's live workspace list. Labels beginning with `WAIT` park inactive sessions at the idle rank and suppress the awaiting-reply presentation; blocked, working, and active-subagent behavior remains visible.
 
-There is **no polling daemon or transcript scanning**. Per-socket locks and atomic private files serialize updates. Requests have bounded timeouts and verify the server's process identity. The plugin never submits prompts, changes focus, renames sessions, or fabricates native agent states. Stored metadata may include session IDs or paths.
+There is **no polling or transcript scanning**. The watcher uses Herdr's event stream and exits when the server socket closes; `cleanup` stops it explicitly. Per-socket locks and atomic private files serialize updates. Requests have bounded timeouts and verify the server's process identity. The plugin never submits prompts, changes focus, renames sessions, or fabricates native agent states. Stored metadata may include session IDs or paths.
 
 ### Limits and coexistence
 
@@ -205,7 +205,7 @@ Review diagnostic logs before sharing them: Herdr invocation context may include
 | File | Purpose |
 | --- | --- |
 | `herdr-plugin.toml` | Manifest, actions, and hooks. |
-| `priority_plus.py` | Tracking, socket API, persistence, and view updates. |
+| `priority_plus.py` | Tracking, socket API/event watcher, persistence, and view updates. |
 | `tests/test_priority_plus.py` | Unit tests. |
 | `tests/test_integration.py` | Isolated real-server tests. |
 | `tests/tui_smoke.py` | Real PTY client test. |
@@ -232,4 +232,4 @@ uv run --with pyte python tests/tui_smoke.py \
 
 Tests use temporary HOME/XDG directories and sockets, discard inherited Herdr connection variables, and stop only their own servers—**never your live sessions**. Evidence under `test-artifacts/` is Git-ignored.
 
-Coverage includes transitions, WAIT workspace rename/presentation, subagent start/refresh/completion, identity changes, moves, restarts, concurrent persistence, foreign metadata/views, and cleanup. The real TUI test checks **unread → clicked/read → draft typed → new work**, WAIT parking, the subagent row and ordering, plus both sorting toggles.
+Coverage includes transitions, WAIT workspace rename/presentation, metadata-only subagent start/refresh/completion, watcher filtering, identity changes, moves, restarts, concurrent persistence, foreign metadata/views, and cleanup. The real TUI test checks **unread → clicked/read → draft typed → new work**, WAIT parking, the subagent row and ordering, plus both sorting toggles.

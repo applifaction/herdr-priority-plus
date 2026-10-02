@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -19,6 +21,7 @@ SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
+WATCH_REQUEST_ID = SOURCE + ":watch"
 SUBAGENT_STATES = ("idle", "done", "working")
 SUBAGENT_SUMMARY = re.compile(r"^⏳ [1-9][0-9]* subagents?(?: \([^()\n]*\))?$")
 VIEW = {
@@ -101,14 +104,19 @@ class Client:
         return response["result"]
 
 
-@contextmanager
-def state_lock(directory, socket_path):
+def instance_folder(directory, socket_path):
     directory = Path(directory)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = hashlib.sha256(os.path.realpath(socket_path).encode()).hexdigest()
     folder = directory / key
     folder.mkdir(mode=0o700, exist_ok=True)
     os.chmod(folder, 0o700)
+    return folder
+
+
+@contextmanager
+def state_lock(directory, socket_path):
+    folder = instance_folder(directory, socket_path)
     fd = os.open(folder / "lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         deadline = time.monotonic() + 20
@@ -173,6 +181,76 @@ def is_wait_workspace(label):
 def has_active_subagents(agent):
     summary = (agent.get("tokens") or {}).get("summary")
     return isinstance(summary, str) and SUBAGENT_SUMMARY.fullmatch(summary) is not None
+
+
+def needs_reconcile_event(message):
+    """Select the metadata-only subagent edges omitted from plugin hooks."""
+    if not isinstance(message, dict):
+        return False
+    data = message.get("data")
+    if not isinstance(data, dict):
+        return False
+    kind = data.get("type") or message.get("event")
+    if not isinstance(kind, str) or kind.replace(".", "_") != "pane_updated":
+        return False
+    pane = data.get("pane")
+    if not isinstance(pane, dict):
+        return False
+    tokens = pane.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        return False
+    if has_active_subagents(pane):
+        labels = pane.get("state_labels") or {}
+        return (tokens.get(TOKEN) != "2"
+                or not isinstance(labels, dict)
+                or any(labels.get(status) != SUBAGENT_LABEL for status in SUBAGENT_STATES))
+    # The rank is our durable edge marker after pi-subagents removes summary.
+    return tokens.get(TOKEN) == "2"
+
+
+def watch_events(socket_path, on_reconcile, on_ready=None):
+    """Subscribe to pane.updated on an event-only connection until it closes."""
+    watcher = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    watcher.settimeout(5)
+    reader = None
+    try:
+        watcher.connect(socket_path)
+        _, uid, _ = struct.unpack("3i", watcher.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        if uid != os.getuid():
+            raise RuntimeError("Herdr socket belongs to another user")
+        request = {"id": WATCH_REQUEST_ID, "method": "events.subscribe",
+                   "params": {"subscriptions": [{"type": "pane.updated"}]}}
+        watcher.sendall((json.dumps(request) + "\n").encode())
+        reader = watcher.makefile("rb")
+        acknowledgement = reader.readline(8 * 1024 * 1024 + 1)
+        if (len(acknowledgement) > 8 * 1024 * 1024
+                or not acknowledgement.endswith(b"\n")):
+            raise RuntimeError("Herdr subscription response missing or exceeds 8 MiB")
+        response = json.loads(acknowledgement)
+        if response.get("id") != WATCH_REQUEST_ID:
+            raise RuntimeError("Unexpected Herdr subscription response id")
+        if "error" in response:
+            raise ApiError(response["error"].get("code", "unknown"))
+        watcher.settimeout(None)
+        if on_ready and on_ready() is False:
+            return
+        while True:
+            line = reader.readline(8 * 1024 * 1024 + 1)
+            if not line:
+                return
+            if len(line) > 8 * 1024 * 1024 or not line.endswith(b"\n"):
+                raise RuntimeError("Herdr event missing or exceeds 8 MiB")
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if needs_reconcile_event(message) and on_reconcile() is False:
+                return
+    finally:
+        if reader:
+            reader.close()
+        watcher.close()
 
 
 def observe(agent, previous=None, waiting=False):
@@ -257,8 +335,8 @@ def reconcile(client, state, path):
         if record["subagent"]:
             label_state = SUBAGENT_LABEL
             labels = agent.get("state_labels") or {}
-            # pi-subagents refreshes its dynamic count label periodically. Its
-            # status-label change triggers reconciliation so this stable label wins.
+            # pi-subagents refreshes its dynamic count label periodically. The
+            # pane.updated watcher lets this stable presentation label win again.
             if (record["applied"] != label_state
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
@@ -278,6 +356,82 @@ def reconcile(client, state, path):
     save_state(path, state)
 
 
+def watcher_lock_path(directory, socket_path):
+    return instance_folder(directory, socket_path) / "watcher.lock"
+
+
+def read_watcher_pid(directory, socket_path):
+    path = watcher_lock_path(directory, socket_path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return None
+        except BlockingIOError:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                return int(os.read(fd, 64).decode().strip())
+            except ValueError:
+                return None
+    finally:
+        os.close(fd)
+
+
+def ensure_watcher(directory, socket_path):
+    # Serialize the cleaned-state check and process registration with cleanup.
+    with state_lock(directory, socket_path) as state_path:
+        if state_path.exists() and json.loads(state_path.read_text()).get("cleaned") is True:
+            return
+        if read_watcher_pid(directory, socket_path) is not None:
+            return
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "watch"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True,
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if read_watcher_pid(directory, socket_path) is not None:
+                return
+            if process.poll() is not None:
+                raise RuntimeError("Priority+ watcher exited during startup")
+            time.sleep(0.025)
+        raise RuntimeError("Priority+ watcher did not acquire its lock")
+
+
+def stop_watcher(directory, socket_path):
+    pid = read_watcher_pid(directory, socket_path)
+    if pid is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and read_watcher_pid(directory, socket_path) is not None:
+        time.sleep(0.05)
+
+
+def run_watcher(directory, socket_path):
+    path = watcher_lock_path(directory, socket_path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+        os.fsync(fd)
+        reconcile_now = lambda: run("sync", directory, socket_path)
+        watch_events(socket_path, reconcile_now, on_ready=reconcile_now)
+    finally:
+        os.close(fd)
+
+
 def run(action, directory, socket_path):
     with state_lock(directory, socket_path) as path:
         client = Client(socket_path)
@@ -293,7 +447,7 @@ def run(action, directory, socket_path):
                     clear_pane(client, pane)
                 state["agents"] = {}
                 save_state(path, state)
-                return
+                return False
             if action in ("enable", "disable", "toggle"):
                 state["enabled"] = (not state["enabled"] if action == "toggle"
                                     else action == "enable")
@@ -308,17 +462,28 @@ def run(action, directory, socket_path):
                     client.call("agent.view.set", VIEW)
                 else:
                     client.call("agent.view.clear", {"source": SOURCE})
+            return not state["cleaned"]
         finally:
             client.close()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sync", "startup", "enable", "disable", "toggle", "cleanup"))
+    parser.add_argument("action", choices=("sync", "startup", "enable", "disable", "toggle", "cleanup", "watch"))
     args = parser.parse_args()
     try:
         # No fallback to a default/live socket or a guessed plugin state dir.
-        run(args.action, os.environ["HERDR_PLUGIN_STATE_DIR"], os.environ["HERDR_SOCKET_PATH"])
+        directory = os.environ["HERDR_PLUGIN_STATE_DIR"]
+        socket_path = os.environ["HERDR_SOCKET_PATH"]
+        if args.action == "watch":
+            run_watcher(directory, socket_path)
+            return 0
+        active = run(args.action, directory, socket_path)
+        if args.action == "cleanup":
+            stop_watcher(directory, socket_path)
+        elif active:
+            # Startup and low-volume hooks are watchdogs for the event subscriber.
+            ensure_watcher(directory, socket_path)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
         print(f"Priority+: {error}", file=sys.stderr)
         return 1

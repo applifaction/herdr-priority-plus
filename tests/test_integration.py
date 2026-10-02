@@ -141,12 +141,13 @@ class RealHerdrTests(unittest.TestCase):
                     report(subagent, "idle")
                     expect_rank(subagent, "4")
                     subagent_summary = "⏳ 1 subagent (worker)"
+                    # A summary-token-only pane.updated event must be sufficient;
+                    # it does not produce a low-volume agent lifecycle hook.
                     call("pane.report_metadata", pane_id=subagent, source="pi-subagents:herdr",
-                         state_labels={state: subagent_summary for state in pp.SUBAGENT_STATES},
                          tokens={"summary": subagent_summary})
                     expect_rank(subagent, "2")
                     wait(lambda: get(subagent).get("state_labels", {}).get("idle") == pp.SUBAGENT_LABEL,
-                         "stable subagent label")
+                         "stable subagent label after metadata-only update")
                     # A pi-subagents refresh temporarily becomes the latest label;
                     # the resulting status-label change must make Priority+ win again.
                     call("pane.report_metadata", pane_id=subagent, source="pi-subagents:herdr",
