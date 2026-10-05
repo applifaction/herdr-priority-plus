@@ -107,7 +107,11 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
         return lines
 
     def fixture_order(lines):
-        names = ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE', 'WAITING']
+        names = [
+            'BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE',
+            'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
+            'WAIT_ALPHA_A', 'WAIT_ALPHA_Z', 'WAITING',
+        ]
         return [name for line in lines for name in names if name in line]
 
     def report(pane, state):
@@ -115,10 +119,16 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
 
     def action(name):
         before = {entry['log_id'] for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']}
-        done = subprocess.run([herdr, 'plugin', 'action', 'invoke', 'local.priority-plus.'+name], env=env, capture_output=True, text=True, timeout=8)
-        if done.returncode:
-            raise RuntimeError(done.stderr)
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + 15
+        while True:
+            done = subprocess.run([herdr, 'plugin', 'action', 'invoke', 'local.priority-plus.'+name], env=env, capture_output=True, text=True, timeout=8)
+            if not done.returncode:
+                break
+            failure = done.stdout + done.stderr
+            if 'plugin_command_limit_reached' not in failure or time.monotonic() >= deadline:
+                raise RuntimeError(failure)
+            pump(.1)
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             pump(.1)
             fresh = [entry for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']
@@ -153,22 +163,66 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
             panes['WAITING'] = wait_created['root_pane']['pane_id']
             rpc('tab.rename', {'tab_id': wait_created['root_pane']['tab_id'], 'label': 'WAITING'})
             report(panes['WAITING'], 'idle')
+            later_created = rpc('workspace.create', {'cwd': temp, 'label': 'LATER/FIXTURE', 'focus': False})
+            panes['DEFERRED'] = later_created['root_pane']['pane_id']
+            rpc('tab.rename', {'tab_id': later_created['root_pane']['tab_id'], 'label': 'DEFERRED'})
+            report(panes['DEFERRED'], 'idle')
+            later_alpha = rpc('workspace.create', {'cwd': temp, 'label': 'LATER/ALPHA', 'focus': False})
+            panes['LATER_ALPHA_Z'] = later_alpha['root_pane']['pane_id']
+            rpc('tab.rename', {'tab_id': later_alpha['root_pane']['tab_id'], 'label': 'LATER_ALPHA_Z'})
+            later_alpha_a = rpc('tab.create', {
+                'workspace_id': later_alpha['workspace']['workspace_id'], 'label': 'LATER_ALPHA_A',
+                'cwd': temp, 'focus': False,
+            })
+            panes['LATER_ALPHA_A'] = later_alpha_a['root_pane']['pane_id']
+            report(panes['LATER_ALPHA_Z'], 'idle')
+            report(panes['LATER_ALPHA_A'], 'idle')
+            wait_alpha = rpc('workspace.create', {'cwd': temp, 'label': 'WAIT/ALPHA', 'focus': False})
+            panes['WAIT_ALPHA_Z'] = wait_alpha['root_pane']['pane_id']
+            rpc('tab.rename', {'tab_id': wait_alpha['root_pane']['tab_id'], 'label': 'WAIT_ALPHA_Z'})
+            wait_alpha_a = rpc('tab.create', {
+                'workspace_id': wait_alpha['workspace']['workspace_id'], 'label': 'WAIT_ALPHA_A',
+                'cwd': temp, 'focus': False,
+            })
+            panes['WAIT_ALPHA_A'] = wait_alpha_a['root_pane']['pane_id']
+            report(panes['WAIT_ALPHA_Z'], 'idle')
+            report(panes['WAIT_ALPHA_A'], 'idle')
+            rpc('workspace.create', {'cwd': temp, 'label': 'normal-after-parked', 'focus': False})
             client = subprocess.Popen([herdr], env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
             pump(1)
             os.write(master, b'\x1b[I')  # report focused OUTER test terminal only
             pump(.2)
             if args.plugin:
                 action('enable')
+                workspace_labels = [workspace['label'] for workspace in rpc('workspace.list')['workspaces']]
+                assert workspace_labels[-4:] == [
+                    'LATER/ALPHA', 'LATER/FIXTURE', 'WAIT/ALPHA', 'WAIT/FIXTURE',
+                ], workspace_labels
+                assert workspace_labels.index('normal-after-parked') < workspace_labels.index('LATER/ALPHA')
             else:
-                rpc('agent.view.set', {'source': 'test:priority-plus', 'label': 'Priority+', 'sort': [{'field': {'token': 'pp_rank'}, 'order': 'desc'}, {'field': 'seen', 'order': 'asc'}, {'field': 'state_change_seq', 'order': 'desc'}]})
-            for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'WAITING']:
+                rpc('agent.view.set', {'source': 'test:priority-plus', 'label': 'Priority+', 'sort': [
+                    {'field': {'token': 'pp_rank'}, 'order': 'desc'},
+                    {'field': {'token': 'pp_workspace_sort'}, 'order': 'asc'},
+                    {'field': {'token': 'pp_session_sort'}, 'order': 'asc'},
+                    {'field': 'seen', 'order': 'asc'},
+                    {'field': 'state_change_seq', 'order': 'desc'},
+                ]})
+            for name in [
+                'BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'DEFERRED', 'WAITING',
+                'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'WAIT_ALPHA_A', 'WAIT_ALPHA_Z',
+            ]:
                 report(panes[name], 'working')
             pump(.8)
             report(panes['BLOCKED'], 'blocked')
             report(panes['REVIEWED'], 'idle')
             report(panes['SUBAGENT'], 'idle')
             report(panes['WAITING'], 'idle')
+            report(panes['DEFERRED'], 'idle')
+            for name in ('LATER_ALPHA_A', 'LATER_ALPHA_Z', 'WAIT_ALPHA_A', 'WAIT_ALPHA_Z'):
+                report(panes[name], 'idle')
             rpc('pane.focus', {'pane_id': panes['WAITING']})
+            pump(.25)
+            rpc('pane.focus', {'pane_id': panes['DEFERRED']})
             pump(.25)
             report(panes['UNREAD'], 'idle')
             summary = '⏳ 1 subagent (worker)'
@@ -178,9 +232,25 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                     'state_labels': {state: summary for state in ['idle', 'done', 'working']}})
                 pump(1)
             else:
-                for name, rank in [('BLOCKED', '5'), ('UNREAD', '4'), ('REVIEWED', '4'),
-                                   ('RUNNING', '3'), ('SUBAGENT', '2'), ('IDLE', '1'), ('WAITING', '1')]:
-                    params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': {'pp_rank': rank}}
+                ranks = {
+                    'BLOCKED': '7', 'UNREAD': '6', 'REVIEWED': '6', 'RUNNING': '5',
+                    'SUBAGENT': '4', 'IDLE': '3', 'LATER_ALPHA_A': '2',
+                    'LATER_ALPHA_Z': '2', 'DEFERRED': '2', 'WAIT_ALPHA_A': '1',
+                    'WAIT_ALPHA_Z': '1', 'WAITING': '1',
+                }
+                parked_names = {
+                    'LATER_ALPHA_A': ('later/alpha', 'later_alpha_a'),
+                    'LATER_ALPHA_Z': ('later/alpha', 'later_alpha_z'),
+                    'DEFERRED': ('later/fixture', 'deferred'),
+                    'WAIT_ALPHA_A': ('wait/alpha', 'wait_alpha_a'),
+                    'WAIT_ALPHA_Z': ('wait/alpha', 'wait_alpha_z'),
+                    'WAITING': ('wait/fixture', 'waiting'),
+                }
+                for name, rank in ranks.items():
+                    tokens = {'pp_rank': rank}
+                    if name in parked_names:
+                        tokens['pp_workspace_sort'], tokens['pp_session_sort'] = parked_names[name]
+                    params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': tokens}
                     if name in ['UNREAD', 'REVIEWED']:
                         params['state_labels'] = {'idle': '◉ Awaiting reply'}
                     elif name == 'SUBAGENT':
@@ -188,27 +258,35 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
             expected_prefix = ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT']
+            expected_suffix = [
+                'IDLE', 'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
+                'WAIT_ALPHA_A', 'WAIT_ALPHA_Z', 'WAITING',
+            ]
             order = fixture_order(lines)
             assert order[:5] == expected_prefix, order
-            assert set(order[5:]) == {'IDLE', 'WAITING'}, order
+            assert order[5:] == expected_suffix, order
             assert not any('Awaiting reply' in line for line in lines), 'Badge must stay hidden for unseen completions'
             assert sum('⏳ Subagent working' in line for line in lines) == 1
-            waiting_row = next(i for i, line in enumerate(lines) if 'WAITING' in line)
-            assert waiting_row + 1 >= len(lines) or 'Awaiting reply' not in lines[waiting_row + 1]
+            for parked_name in (
+                'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
+                'WAIT_ALPHA_A', 'WAIT_ALPHA_Z', 'WAITING',
+            ):
+                parked_row = next(i for i, line in enumerate(lines) if parked_name in line)
+                assert parked_row + 1 >= len(lines) or 'Awaiting reply' not in lines[parked_row + 1]
             row = next(i+1 for i, line in enumerate(lines) if 'REVIEWED' in line)
             col = lines[row-1].index('REVIEWED')+2
             os.write(master, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
             lines = capture('after_review_click')
             order = fixture_order(lines)
             assert order[:5] == expected_prefix, order
-            assert set(order[5:]) == {'IDLE', 'WAITING'}, order
+            assert order[5:] == expected_suffix, order
             assert sum('◉ Awaiting reply' in line for line in lines) == 1, 'Exactly the reviewed completion needs a badge'
             rpc('pane.send_text', {'pane_id': panes['REVIEWED'], 'text': 'draft-not-submitted'})
             lines = capture('after_typing_only')
             assert sum('◉ Awaiting reply' in line for line in lines) == 1
             report(panes['REVIEWED'], 'working')
             if not args.plugin:
-                rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '2'}})
+                rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '5'}})
             lines = capture('next_working_run')
             assert not any('Awaiting reply' in line for line in lines)
             assert fixture_order(lines)[0:2] == ['BLOCKED', 'UNREAD']

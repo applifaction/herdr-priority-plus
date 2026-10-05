@@ -19,9 +19,21 @@ import time
 PLUGIN = "local.priority-plus"
 SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
+WORKSPACE_TOKEN = "pp_workspace_sort"
+SESSION_TOKEN = "pp_session_sort"
+OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN)
+RANK_BLOCKED = "7"
+RANK_PENDING = "6"
+RANK_WORKING = "5"
+RANK_SUBAGENT = "4"
+RANK_IDLE = "3"
+RANK_LATER = "2"
+RANK_WAIT = "1"
+RANK_UNKNOWN = "0"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
+WATCHER_VERSION = "0.3.0"
 SUBAGENT_STATES = ("idle", "done", "working")
 SUBAGENT_SUMMARY = re.compile(r"^⏳ [1-9][0-9]* subagents?(?: \([^()\n]*\))?$")
 VIEW = {
@@ -29,6 +41,8 @@ VIEW = {
     "label": "Priority+",
     "sort": [
         {"field": {"token": TOKEN}, "order": "desc"},
+        {"field": {"token": WORKSPACE_TOKEN}, "order": "asc"},
+        {"field": {"token": SESSION_TOKEN}, "order": "asc"},
         {"field": "seen", "order": "asc"},
         {"field": "state_change_seq", "order": "desc"},
     ],
@@ -165,7 +179,8 @@ def load_state(path, boot):
                     or type(record.get("pending")) is not bool
                     or not isinstance(record.get("status"), str)
                     or ("subagent" in record and type(record["subagent"]) is not bool)
-                    or ("waiting" in record and type(record["waiting"]) is not bool)):
+                    or ("waiting" in record and type(record["waiting"]) is not bool)
+                    or record.get("parking") not in (None, "later", "wait")):
                 raise RuntimeError("Invalid Priority+ agent record")
         if state.get("boot") != boot:
             state["agents"] = {}  # Never compare lifecycle counters across boots.
@@ -174,8 +189,54 @@ def load_state(path, boot):
     return {"version": 1, "boot": boot, "enabled": True, "cleaned": False, "agents": {}}
 
 
+def workspace_parking_kind(label):
+    if not isinstance(label, str):
+        return None
+    if label.startswith("LATER"):
+        return "later"
+    if label.startswith("WAIT"):
+        return "wait"
+    return None
+
+
 def is_wait_workspace(label):
-    return isinstance(label, str) and label.startswith("WAIT")
+    return workspace_parking_kind(label) == "wait"
+
+
+def is_later_workspace(label):
+    return workspace_parking_kind(label) == "later"
+
+
+def is_parked_workspace(label):
+    return workspace_parking_kind(label) is not None
+
+
+def alphabetical_key(value):
+    return value.casefold() if isinstance(value, str) else ""
+
+
+def reconcile_workspace_order(client, workspaces):
+    """Keep normal workspaces stable and parked groups alphabetized."""
+    groups = {None: [], "later": [], "wait": []}
+    for workspace in workspaces:
+        groups[workspace_parking_kind(workspace.get("label"))].append(workspace)
+    groups["later"].sort(key=lambda workspace: alphabetical_key(workspace.get("label")))
+    groups["wait"].sort(key=lambda workspace: alphabetical_key(workspace.get("label")))
+    desired = groups[None] + groups["later"] + groups["wait"]
+    current_ids = [workspace["workspace_id"] for workspace in workspaces]
+    desired_ids = [workspace["workspace_id"] for workspace in desired]
+    if current_ids == desired_ids:
+        return False
+    parked_ids = [workspace["workspace_id"] for workspace in groups["later"] + groups["wait"]]
+    try:
+        client.call("workspace.move_block", {"workspace_ids": parked_ids})
+    except ApiError as error:
+        # A workspace can close after workspace.list. Its lifecycle hook will
+        # retry against a fresh authoritative snapshot.
+        if error.code == "workspace_not_found":
+            return False
+        raise
+    return True
 
 
 def has_active_subagents(agent):
@@ -201,11 +262,11 @@ def needs_reconcile_event(message):
         return False
     if has_active_subagents(pane):
         labels = pane.get("state_labels") or {}
-        return (tokens.get(TOKEN) != "2"
+        return (tokens.get(TOKEN) != RANK_SUBAGENT
                 or not isinstance(labels, dict)
                 or any(labels.get(status) != SUBAGENT_LABEL for status in SUBAGENT_STATES))
     # The rank is our durable edge marker after pi-subagents removes summary.
-    return tokens.get(TOKEN) == "2"
+    return tokens.get(TOKEN) == RANK_SUBAGENT
 
 
 def watch_events(socket_path, on_reconcile, on_ready=None):
@@ -253,7 +314,8 @@ def watch_events(socket_path, on_reconcile, on_ready=None):
         watcher.close()
 
 
-def observe(agent, previous=None, waiting=False):
+def observe(agent, previous=None, parking=None):
+    # Keep the persisted v1 `waiting` field for backward-compatible state files.
     session = agent.get("agent_session") or {}
     identity = [agent.get("agent"), session.get("source"), session.get("agent"),
                 session.get("kind"), session.get("value")]
@@ -268,20 +330,24 @@ def observe(agent, previous=None, waiting=False):
     # Working/blocked/unknown are not a completed run. Keep the underlying
     # pending flag while a child runs so Awaiting reply can return afterwards.
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
-            "subagent": has_active_subagents(agent), "waiting": waiting,
-            "applied": previous.get("applied") if previous else None}
+            "subagent": has_active_subagents(agent), "waiting": parking is not None,
+            "parking": parking, "applied": previous.get("applied") if previous else None}
 
 
 def rank(record):
     if record["status"] == "blocked":
-        return "5"
+        return RANK_BLOCKED
     if record.get("subagent"):
-        return "2"
-    if record.get("waiting"):
-        return "3" if record["status"] == "working" else "1"
+        return RANK_SUBAGENT
+    if record["status"] == "working":
+        return RANK_WORKING
+    if record.get("parking") == "later":
+        return RANK_LATER
+    if record.get("parking") == "wait":
+        return RANK_WAIT
     if record["pending"]:
-        return "4"
-    return {"working": "3", "idle": "1"}.get(record["status"], "0")
+        return RANK_PENDING
+    return {"idle": RANK_IDLE}.get(record["status"], RANK_UNKNOWN)
 
 
 def metadata(client, pane_id, **fields):
@@ -296,22 +362,30 @@ def metadata(client, pane_id, **fields):
 
 def clear_pane(client, pane):
     fields = {"clear_state_labels": True}
-    if TOKEN in pane.get("tokens", {}):
-        fields["tokens"] = {TOKEN: None}
+    tokens = pane.get("tokens", {})
+    owned = {token: None for token in OWNED_TOKENS if token in tokens}
+    if owned:
+        fields["tokens"] = owned
     metadata(client, pane["pane_id"], **fields)
 
 
 def reconcile(client, state, path):
     agents = client.call("agent.list")["agents"]
-    wait_workspaces = {
-        workspace["workspace_id"]
-        for workspace in client.call("workspace.list")["workspaces"]
-        if is_wait_workspace(workspace.get("label"))
+    workspaces = client.call("workspace.list")["workspaces"]
+    tabs = client.call("tab.list")["tabs"]
+    if state["enabled"]:
+        reconcile_workspace_order(client, workspaces)
+    workspace_by_id = {workspace["workspace_id"]: workspace for workspace in workspaces}
+    parking_by_workspace = {
+        workspace_id: workspace_parking_kind(workspace.get("label"))
+        for workspace_id, workspace in workspace_by_id.items()
+        if is_parked_workspace(workspace.get("label"))
     }
+    tab_label_by_id = {tab["tab_id"]: tab.get("label") for tab in tabs}
     previous = state["agents"]
     records = {
         agent["terminal_id"]: observe(
-            agent, previous.get(agent["terminal_id"]), agent.get("workspace_id") in wait_workspaces)
+            agent, previous.get(agent["terminal_id"]), parking_by_workspace.get(agent.get("workspace_id")))
         for agent in agents
     }
     # Save observations BEFORE side effects, so a killed hook cannot lose a
@@ -328,8 +402,22 @@ def reconcile(client, state, path):
         record = records[agent["terminal_id"]]
         desired = rank(record)
         fields = {}
-        if agent.get("tokens", {}).get(TOKEN) != desired:
-            fields["tokens"] = {TOKEN: desired}
+        current_tokens = agent.get("tokens", {})
+        desired_tokens = {TOKEN: desired, WORKSPACE_TOKEN: None, SESSION_TOKEN: None}
+        if desired in (RANK_LATER, RANK_WAIT):
+            workspace = workspace_by_id.get(agent.get("workspace_id"), {})
+            desired_tokens[WORKSPACE_TOKEN] = alphabetical_key(workspace.get("label"))
+            session_label = tab_label_by_id.get(agent.get("tab_id"))
+            if isinstance(session_label, str):
+                desired_tokens[SESSION_TOKEN] = alphabetical_key(session_label)
+        token_updates = {
+            token: value
+            for token, value in desired_tokens.items()
+            if (value is not None and current_tokens.get(token) != value)
+            or (value is None and token in current_tokens)
+        }
+        if token_updates:
+            fields["tokens"] = token_updates
         # Cache the emitted text, not just a boolean: upgrades can refresh
         # an existing badge without resetting its pending completion.
         if record["subagent"]:
@@ -360,24 +448,29 @@ def watcher_lock_path(directory, socket_path):
     return instance_folder(directory, socket_path) / "watcher.lock"
 
 
-def read_watcher_pid(directory, socket_path):
+def read_watcher_registration(directory, socket_path):
     path = watcher_lock_path(directory, socket_path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
-        return None
+        return None, None
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return None
+            return None, None
         except BlockingIOError:
             os.lseek(fd, 0, os.SEEK_SET)
+            fields = os.read(fd, 128).decode().strip().split(maxsplit=1)
             try:
-                return int(os.read(fd, 64).decode().strip())
-            except ValueError:
-                return None
+                return int(fields[0]), fields[1] if len(fields) == 2 else None
+            except (IndexError, ValueError):
+                return None, None
     finally:
         os.close(fd)
+
+
+def read_watcher_pid(directory, socket_path):
+    return read_watcher_registration(directory, socket_path)[0]
 
 
 def ensure_watcher(directory, socket_path):
@@ -385,8 +478,11 @@ def ensure_watcher(directory, socket_path):
     with state_lock(directory, socket_path) as state_path:
         if state_path.exists() and json.loads(state_path.read_text()).get("cleaned") is True:
             return
-        if read_watcher_pid(directory, socket_path) is not None:
+        watcher_pid, watcher_version = read_watcher_registration(directory, socket_path)
+        if watcher_pid is not None and watcher_version == WATCHER_VERSION:
             return
+        if watcher_pid is not None:
+            stop_watcher(directory, socket_path)
         process = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "watch"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -394,7 +490,8 @@ def ensure_watcher(directory, socket_path):
         )
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            if read_watcher_pid(directory, socket_path) is not None:
+            watcher_pid, watcher_version = read_watcher_registration(directory, socket_path)
+            if watcher_pid is not None and watcher_version == WATCHER_VERSION:
                 return
             if process.poll() is not None:
                 raise RuntimeError("Priority+ watcher exited during startup")
@@ -424,7 +521,7 @@ def run_watcher(directory, socket_path):
         except BlockingIOError:
             return
         os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode())
+        os.write(fd, f"{os.getpid()} {WATCHER_VERSION}".encode())
         os.fsync(fd)
         reconcile_now = lambda: run("sync", directory, socket_path)
         watch_events(socket_path, reconcile_now, on_ready=reconcile_now)
