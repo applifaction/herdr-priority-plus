@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -312,6 +313,52 @@ class WatcherTests(unittest.TestCase):
             {"event": "pane_closed", "data": {"type": "pane_closed", "pane_id": "w1:p1"}}))
         self.assertFalse(pp.needs_reconcile_event({"event": "pane_updated", "data": {}}))
 
+    def test_active_status_files_are_a_summary_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "async-subagent-runs"
+            active = root / "active"
+            complete = root / "complete"
+            active.mkdir(parents=True)
+            complete.mkdir()
+            session = "/sessions/parent.jsonl"
+            now = time.time() * 1000
+            (active / "status.json").write_text(json.dumps({
+                "sessionId": session,
+                "state": "running",
+                "pid": os.getpid(),
+                "startedAt": now,
+                "lastUpdate": now,
+                "steps": [{"status": "running"}],
+            }))
+            (complete / "status.json").write_text(json.dumps({
+                "sessionId": "/sessions/complete.jsonl",
+                "state": "complete",
+                "pid": os.getpid(),
+                "startedAt": now,
+                "lastUpdate": now,
+                "steps": [{"status": "running"}],
+            }))
+            sessions = pp.active_subagent_sessions(root, now_ms=now)
+            self.assertEqual(sessions, {session})
+            record = pp.observe(agent(
+                "idle", agent_session={"source": "herdr:pi", "agent": "pi",
+                                        "kind": "path", "value": session}),
+                active_sessions=sessions)
+            self.assertTrue(record["subagent"])
+            self.assertEqual(pp.rank(record), pp.RANK_SUBAGENT)
+
+            stale = root / "stale"
+            stale.mkdir()
+            (stale / "status.json").write_text(json.dumps({
+                "sessionId": "/sessions/stale.jsonl",
+                "state": "running",
+                "pid": os.getpid(),
+                "startedAt": now,
+                "lastUpdate": now - (pp.SUBAGENT_STATUS_STALE_SECONDS + 1) * 1000,
+                "steps": [{"status": "running"}],
+            }))
+            self.assertEqual(pp.active_subagent_sessions(root, now_ms=now), {session})
+
     def test_socket_watcher_subscribes_and_reconciles_metadata_edge(self):
         with tempfile.TemporaryDirectory() as directory:
             path = directory + "/api.sock"
@@ -347,6 +394,73 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(requests[0]["method"], "events.subscribe")
             self.assertEqual(requests[0]["params"], {"subscriptions": [{"type": "pane.updated"}]})
             self.assertEqual(reconciles, [True])
+
+    def test_socket_watcher_ticks_without_events_and_resubscribes_after_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + "/api.sock"
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen()
+
+            def serve_tick():
+                connection, _ = server.accept()
+                with connection:
+                    request = b""
+                    while not request.endswith(b"\n"):
+                        request += connection.recv(8192)
+                    connection.sendall((json.dumps({
+                        "id": pp.WATCH_REQUEST_ID,
+                        "result": {"type": "subscription_started"},
+                    }) + "\n").encode())
+                    event = (json.dumps(self.pane_event(
+                        pane_id="w1:p1", tokens={pp.TOKEN: pp.RANK_PENDING})) + "\n").encode()
+                    deadline = time.monotonic() + 0.2
+                    while time.monotonic() < deadline:
+                        try:
+                            connection.sendall(event)
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                        time.sleep(0.005)
+
+            thread = threading.Thread(target=serve_tick, daemon=True)
+            thread.start()
+            ticks = []
+            try:
+                reconnect = pp.watch_events(
+                    path, lambda: True, on_tick=lambda: ticks.append(True) or False,
+                    tick_seconds=0.05)
+            finally:
+                server.close()
+                thread.join(5)
+            self.assertFalse(reconnect)
+            self.assertEqual(ticks, [True])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + "/api.sock"
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen()
+
+            def serve_loss():
+                connection, _ = server.accept()
+                with connection:
+                    request = b""
+                    while not request.endswith(b"\n"):
+                        request += connection.recv(8192)
+                    connection.sendall(
+                        (json.dumps({"id": pp.WATCH_REQUEST_ID,
+                                     "result": {"type": "subscription_started"}}) + "\n").encode()
+                        + (json.dumps({"event": "events_lost",
+                                      "data": {"type": "events_lost"}}) + "\n").encode())
+
+            thread = threading.Thread(target=serve_loss, daemon=True)
+            thread.start()
+            try:
+                reconnect = pp.watch_events(path, lambda: True)
+            finally:
+                server.close()
+                thread.join(5)
+            self.assertTrue(reconnect)
 
     def test_stale_watcher_is_replaced_after_plugin_upgrade(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -735,7 +849,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.3.0")
+        self.assertEqual(manifest["version"], "0.3.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

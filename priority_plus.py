@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -33,7 +35,14 @@ RANK_UNKNOWN = "0"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.3.0"
+WATCHER_VERSION = "0.3.1"
+WATCH_TICK_SECONDS = 2
+WATCH_FULL_RECONCILE_SECONDS = 30
+SUBAGENT_STATUS_LIMIT = 1024 * 1024
+SUBAGENT_STATUS_SCAN_LIMIT = 512
+SUBAGENT_STATUS_STALE_SECONDS = 10 * 60
+ACTIVE_RUN_STATES = ("queued", "running")
+TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
 SUBAGENT_STATES = ("idle", "done", "working")
 SUBAGENT_SUMMARY = re.compile(r"^⏳ [1-9][0-9]* subagents?(?: \([^()\n]*\))?$")
 VIEW = {
@@ -239,9 +248,83 @@ def reconcile_workspace_order(client, workspaces):
     return True
 
 
-def has_active_subagents(agent):
+def process_predates_run(pid, started_at_ms):
+    """Reject stale artifacts whose PID has since been reused."""
+    if type(pid) is not int or pid <= 0 or not isinstance(started_at_ms, (int, float)):
+        return False
+    os.kill(pid, 0)
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    process_start_ticks = int(fields[19])
+    uptime_seconds = float(Path("/proc/uptime").read_text().split()[0])
+    boot_epoch = time.time() - uptime_seconds
+    process_started_at = boot_epoch + process_start_ticks / os.sysconf("SC_CLK_TCK")
+    return process_started_at <= started_at_ms / 1000 + 5
+
+
+def active_subagent_sessions(root=None, now_ms=None):
+    """Return live parent session paths from recent pi-subagents artifacts."""
+    if root is None:
+        root = (Path(tempfile.gettempdir()) / f"pi-subagents-uid-{os.getuid()}"
+                / "async-subagent-runs")
+    root = Path(root)
+    if not root.is_dir():
+        return set()
+    now_ms = time.time() * 1000 if now_ms is None else now_ms
+    candidates = []
+    for path in root.glob("*/status.json"):
+        try:
+            info = path.stat(follow_symlinks=False)
+            if (info.st_uid == os.getuid() and stat.S_ISREG(info.st_mode)
+                    and info.st_size <= SUBAGENT_STATUS_LIMIT
+                    and now_ms / 1000 - info.st_mtime <= SUBAGENT_STATUS_STALE_SECONDS):
+                candidates.append((info.st_mtime_ns, path))
+        except OSError:
+            continue
+    sessions = set()
+    for _, path in sorted(candidates, reverse=True)[:SUBAGENT_STATUS_SCAN_LIMIT]:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(fd)
+                if (info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode)
+                        or info.st_size > SUBAGENT_STATUS_LIMIT):
+                    continue
+                payload = os.read(fd, SUBAGENT_STATUS_LIMIT + 1)
+            finally:
+                os.close(fd)
+            if len(payload) > SUBAGENT_STATUS_LIMIT:
+                continue
+            status = json.loads(payload)
+            if not isinstance(status, dict):
+                continue
+            session = status.get("sessionId")
+            top_state = status.get("state")
+            step_states = [step.get("status") for step in status.get("steps", [])
+                           if isinstance(step, dict)]
+            if top_state in TERMINAL_RUN_STATES:
+                continue
+            active = (top_state in ACTIVE_RUN_STATES
+                      or (top_state is None and any(state in ACTIVE_RUN_STATES
+                                                   for state in step_states)))
+            last_update = status.get("lastUpdate")
+            if (not isinstance(session, str) or not session or not active
+                    or not isinstance(last_update, (int, float))
+                    or now_ms - last_update > SUBAGENT_STATUS_STALE_SECONDS * 1000
+                    or not process_predates_run(status.get("pid"), status.get("startedAt"))):
+                continue
+            sessions.add(session)
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError,
+                IndexError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return sessions
+
+
+def has_active_subagents(agent, active_sessions=None):
     summary = (agent.get("tokens") or {}).get("summary")
-    return isinstance(summary, str) and SUBAGENT_SUMMARY.fullmatch(summary) is not None
+    if isinstance(summary, str) and SUBAGENT_SUMMARY.fullmatch(summary) is not None:
+        return True
+    session = (agent.get("agent_session") or {}).get("value")
+    return isinstance(session, str) and session in (active_sessions or ())
 
 
 def needs_reconcile_event(message):
@@ -269,11 +352,11 @@ def needs_reconcile_event(message):
     return tokens.get(TOKEN) == RANK_SUBAGENT
 
 
-def watch_events(socket_path, on_reconcile, on_ready=None):
-    """Subscribe to pane.updated on an event-only connection until it closes."""
+def watch_events(socket_path, on_reconcile, on_ready=None, on_tick=None,
+                 tick_seconds=WATCH_TICK_SECONDS):
+    """Subscribe until shutdown; return true only when Herdr requests recovery."""
     watcher = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     watcher.settimeout(5)
-    reader = None
     try:
         watcher.connect(socket_path)
         _, uid, _ = struct.unpack("3i", watcher.getsockopt(
@@ -283,11 +366,15 @@ def watch_events(socket_path, on_reconcile, on_ready=None):
         request = {"id": WATCH_REQUEST_ID, "method": "events.subscribe",
                    "params": {"subscriptions": [{"type": "pane.updated"}]}}
         watcher.sendall((json.dumps(request) + "\n").encode())
-        reader = watcher.makefile("rb")
-        acknowledgement = reader.readline(8 * 1024 * 1024 + 1)
-        if (len(acknowledgement) > 8 * 1024 * 1024
-                or not acknowledgement.endswith(b"\n")):
-            raise RuntimeError("Herdr subscription response missing or exceeds 8 MiB")
+        buffer = b""
+        while b"\n" not in buffer:
+            chunk = watcher.recv(65536)
+            if not chunk:
+                raise RuntimeError("Herdr subscription response missing")
+            buffer += chunk
+            if len(buffer) > 8 * 1024 * 1024:
+                raise RuntimeError("Herdr subscription response exceeds 8 MiB")
+        acknowledgement, buffer = buffer.split(b"\n", 1)
         response = json.loads(acknowledgement)
         if response.get("id") != WATCH_REQUEST_ID:
             raise RuntimeError("Unexpected Herdr subscription response id")
@@ -295,26 +382,48 @@ def watch_events(socket_path, on_reconcile, on_ready=None):
             raise ApiError(response["error"].get("code", "unknown"))
         watcher.settimeout(None)
         if on_ready and on_ready() is False:
-            return
+            return False
+        next_tick = time.monotonic() + tick_seconds
         while True:
-            line = reader.readline(8 * 1024 * 1024 + 1)
-            if not line:
-                return
-            if len(line) > 8 * 1024 * 1024 or not line.endswith(b"\n"):
-                raise RuntimeError("Herdr event missing or exceeds 8 MiB")
-            try:
-                message = json.loads(line)
-            except ValueError:
-                continue
-            if needs_reconcile_event(message) and on_reconcile() is False:
-                return
+            now = time.monotonic()
+            if now >= next_tick:
+                next_tick = now + tick_seconds
+                if on_tick and on_tick() is False:
+                    return False
+            if b"\n" not in buffer:
+                timeout = max(0, next_tick - time.monotonic())
+                readable, _, _ = select.select([watcher], [], [], timeout)
+                if not readable:
+                    continue
+                chunk = watcher.recv(65536)
+                if not chunk:
+                    return False
+                buffer += chunk
+                if len(buffer) > 8 * 1024 * 1024:
+                    raise RuntimeError("Herdr event exceeds 8 MiB")
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                data = message.get("data") if isinstance(message, dict) else None
+                kind = ((data or {}).get("type") if isinstance(data, dict) else None) \
+                    or (message.get("event") if isinstance(message, dict) else None)
+                if isinstance(kind, str) and kind.replace(".", "_") == "events_lost":
+                    return True
+                if needs_reconcile_event(message) and on_reconcile() is False:
+                    return False
+                now = time.monotonic()
+                if now >= next_tick:
+                    next_tick = now + tick_seconds
+                    if on_tick and on_tick() is False:
+                        return False
     finally:
-        if reader:
-            reader.close()
         watcher.close()
 
 
-def observe(agent, previous=None, parking=None):
+def observe(agent, previous=None, parking=None, active_sessions=None):
     # Keep the persisted v1 `waiting` field for backward-compatible state files.
     session = agent.get("agent_session") or {}
     identity = [agent.get("agent"), session.get("source"), session.get("agent"),
@@ -330,7 +439,7 @@ def observe(agent, previous=None, parking=None):
     # Working/blocked/unknown are not a completed run. Keep the underlying
     # pending flag while a child runs so Awaiting reply can return afterwards.
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
-            "subagent": has_active_subagents(agent), "waiting": parking is not None,
+            "subagent": has_active_subagents(agent, active_sessions), "waiting": parking is not None,
             "parking": parking, "applied": previous.get("applied") if previous else None}
 
 
@@ -383,9 +492,11 @@ def reconcile(client, state, path):
     }
     tab_label_by_id = {tab["tab_id"]: tab.get("label") for tab in tabs}
     previous = state["agents"]
+    active_sessions = active_subagent_sessions()
     records = {
         agent["terminal_id"]: observe(
-            agent, previous.get(agent["terminal_id"]), parking_by_workspace.get(agent.get("workspace_id")))
+            agent, previous.get(agent["terminal_id"]),
+            parking_by_workspace.get(agent.get("workspace_id")), active_sessions)
         for agent in agents
     }
     # Save observations BEFORE side effects, so a killed hook cannot lose a
@@ -524,7 +635,21 @@ def run_watcher(directory, socket_path):
         os.write(fd, f"{os.getpid()} {WATCHER_VERSION}".encode())
         os.fsync(fd)
         reconcile_now = lambda: run("sync", directory, socket_path)
-        watch_events(socket_path, reconcile_now, on_ready=reconcile_now)
+        projection = active_subagent_sessions()
+        last_full_reconcile = time.monotonic()
+
+        def tick():
+            nonlocal projection, last_full_reconcile
+            current = active_subagent_sessions()
+            now = time.monotonic()
+            if current != projection or now - last_full_reconcile >= WATCH_FULL_RECONCILE_SECONDS:
+                projection = current
+                last_full_reconcile = now
+                return reconcile_now()
+            return True
+
+        while watch_events(socket_path, reconcile_now, on_ready=reconcile_now, on_tick=tick):
+            time.sleep(0.05)
     finally:
         os.close(fd)
 
