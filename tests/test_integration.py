@@ -33,7 +33,7 @@ class RealHerdrTests(unittest.TestCase):
                               '[ui.sidebar.agents]\nrows = [\n'
                               '  ["state_icon", "agent", "workspace"],\n'
                               '  [{ token = "state_text", rules = [{ equals = "⏳ Subagent working" }, '
-                              '{ equals = "◉ Awaiting reply" }, { contains = "", hide = true }] }],\n]\n')
+                              '{ contains = "", hide = true }] }],\n]\n')
             env.update(HERDR_SOCKET_PATH=str(base / "api.sock"),
                        HERDR_CLIENT_SOCKET_PATH=str(base / "client.sock"),
                        HERDR_CONFIG_PATH=str(config), SHELL="/bin/sh", TERM="xterm-256color")
@@ -184,7 +184,8 @@ class RealHerdrTests(unittest.TestCase):
                     evidence.append("parked agent tokens follow Spaces order then live tab/session label")
                     report(plain, "idle")
                     expect_rank(plain, "3")
-                    self.assertNotEqual(get(plain).get("state_labels", {}).get("idle"), pp.LABEL)
+                    self.assertNotEqual(get(plain).get("state_labels", {}).get("idle"),
+                                        pp.LEGACY_PENDING_LABEL)
                     report(working, "working")
                     expect_rank(working, "5")
                     report(blocked, "blocked")
@@ -197,43 +198,18 @@ class RealHerdrTests(unittest.TestCase):
                         expect_rank(pane, "5")
                         report(pane, "idle")
                         expect_rank(pane, "6")
-                        wait(lambda: get(pane).get("state_labels", {}).get("idle") == pp.LABEL, "pending badge")
+                        wait(lambda: get(pane).get("state_labels", {}).get("idle") !=
+                             pp.LEGACY_PENDING_LABEL, "no pending badge")
                         self.assertEqual(get(pane)["tokens"]["foreign"], "keep")
                         self.assertEqual(get(pane)["title"], "foreign title")
                         self.assertEqual(get(pane)["state_labels"]["working"], "foreign work")
                     self.assertEqual(get(background)["agent_status"], "done")
-                    call(
-                        "pane.report_metadata",
-                        pane_id=background,
-                        source="pi:context-attention",
-                        tokens={pp.CONTEXT_TOKEN: pp.COMPACTION_LABEL},
-                    )
-                    wait(
-                        lambda: get(background).get("tokens", {}).get(
-                            pp.CONTEXT_SUPPRESSION_TOKEN
-                        ) == "1",
-                        "compaction suppression token",
-                    )
-                    wait(
-                        lambda: get(background).get("state_labels", {}).get("idle") != pp.LABEL,
-                        "compaction hides awaiting label",
-                    )
                     self.assertEqual(get(background)["tokens"][pp.TOKEN], pp.RANK_PENDING)
-                    call(
-                        "pane.report_metadata",
-                        pane_id=background,
-                        source="pi:context-attention",
-                        tokens={pp.CONTEXT_TOKEN: None},
-                    )
-                    wait(
-                        lambda: pp.CONTEXT_SUPPRESSION_TOKEN not in get(background).get("tokens", {}),
-                        "compaction suppression clears",
-                    )
-                    wait(
-                        lambda: get(background).get("state_labels", {}).get("idle") == pp.LABEL,
-                        "awaiting label returns after compaction",
-                    )
-                    evidence.append("context compaction hides Awaiting reply and restores it afterwards")
+                    self.assertNotEqual(get(background).get("state_labels", {}).get("idle"),
+                                        pp.LEGACY_PENDING_LABEL)
+                    self.assertNotIn(pp.LEGACY_CONTEXT_SUPPRESSION_TOKEN,
+                                     get(background).get("tokens", {}))
+                    evidence.append("pending completions keep their rank without a reply badge")
                     for pane in (focused, background, working, blocked, plain,
                                  later_alpha, later_alpha_second, waiting_alpha):
                         expect_workspace_token(pane)
@@ -274,8 +250,8 @@ class RealHerdrTests(unittest.TestCase):
                     call("pane.report_metadata", pane_id=subagent, source="pi-subagents:herdr",
                          clear_state_labels=True, tokens={"summary": None})
                     expect_rank(subagent, "6")
-                    wait(lambda: get(subagent).get("state_labels", {}).get("idle") == pp.LABEL,
-                         "awaiting label restored after subagent")
+                    wait(lambda: get(subagent).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "pending rank has no reply badge")
                     evidence.append("active subagent rank 4 sits below working rank 5 and restores pending rank 6")
                     report(waiting, "working")
                     expect_rank(waiting, "5")
@@ -284,16 +260,16 @@ class RealHerdrTests(unittest.TestCase):
                     call("pane.focus", pane_id=waiting)
                     wait(lambda: get(waiting)["agent_status"] == "idle", "review WAIT result")
                     expect_rank(waiting, "1")
-                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") != pp.LABEL,
-                         "WAIT suppresses awaiting label")
+                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "WAIT has no pending label")
                     call("workspace.rename", workspace_id=waiting_workspace, label="resumed")
                     expect_rank(waiting, "6")
-                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") == pp.LABEL,
-                         "leaving WAIT restores awaiting label")
+                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "leaving WAIT has no pending label")
                     call("workspace.rename", workspace_id=waiting_workspace, label="WAIT/fixture")
                     expect_rank(waiting, "1")
-                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") != pp.LABEL,
-                         "returning to WAIT clears awaiting label")
+                    wait(lambda: get(waiting).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "returning to WAIT has no pending label")
                     evidence.append("WAIT workspace keeps pending history but presents reviewed sessions as ordinary idle")
                     report(later, "working")
                     expect_rank(later, "5")
@@ -302,17 +278,17 @@ class RealHerdrTests(unittest.TestCase):
                     call("pane.focus", pane_id=later)
                     wait(lambda: get(later)["agent_status"] == "idle", "review LATER result")
                     expect_rank(later, "2")
-                    wait(lambda: get(later).get("state_labels", {}).get("idle") != pp.LABEL,
-                         "LATER suppresses awaiting label")
+                    wait(lambda: get(later).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "LATER has no pending label")
                     later_workspace = get(later)["workspace_id"]
                     call("workspace.rename", workspace_id=later_workspace, label="resumed-later")
                     expect_rank(later, "6")
-                    wait(lambda: get(later).get("state_labels", {}).get("idle") == pp.LABEL,
-                         "leaving LATER restores awaiting label")
+                    wait(lambda: get(later).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "leaving LATER has no pending label")
                     call("workspace.rename", workspace_id=later_workspace, label="LATER/fixture")
                     expect_rank(later, "2")
-                    wait(lambda: get(later).get("state_labels", {}).get("idle") != pp.LABEL,
-                         "returning to LATER clears awaiting label")
+                    wait(lambda: get(later).get("state_labels", {}).get("idle") !=
+                         pp.LEGACY_PENDING_LABEL, "returning to LATER has no pending label")
                     wait(lambda: workspace_labels() == expected_workspace_order,
                          "renamed LATER keeps its user-selected position")
                     evidence.append("LATER matches WAIT agent parking without changing Space position")
@@ -321,8 +297,9 @@ class RealHerdrTests(unittest.TestCase):
                     call("pane.send_text", pane_id=background, text="draft-not-submitted")
                     time.sleep(0.15)
                     self.assertEqual(get(background)["tokens"][pp.TOKEN], "6")
-                    self.assertEqual(get(background)["state_labels"]["idle"], pp.LABEL)
-                    evidence.append("pane.focus and draft typing preserve pending label/rank")
+                    self.assertNotEqual(get(background).get("state_labels", {}).get("idle"),
+                                        pp.LEGACY_PENDING_LABEL)
+                    evidence.append("pane.focus and draft typing preserve the pending rank without a label")
                     terminal = get(background)["terminal_id"]
                     moved = call("pane.move", pane_id=background,
                                  destination={"type": "new_workspace", "label": "moved"}, focus=True)["move_result"]
@@ -330,7 +307,8 @@ class RealHerdrTests(unittest.TestCase):
                     background = moved["pane"]["pane_id"]
                     expect_rank(background, "6")
                     self.assertEqual(get(background)["terminal_id"], terminal)
-                    self.assertEqual(get(background)["state_labels"]["idle"], pp.LABEL)
+                    self.assertNotEqual(get(background).get("state_labels", {}).get("idle"),
+                                        pp.LEGACY_PENDING_LABEL)
                     evidence.append("pane move preserves completion by terminal identity")
                     # Other plugins' views are not reclaimed by sync or cleared by disable.
                     call("agent.view.set", source="test:foreign", label="foreign", sort=[])
@@ -375,7 +353,8 @@ class RealHerdrTests(unittest.TestCase):
                     for pane in (focused, background, blocked, plain, working, subagent,
                                  waiting, later, waiting_alpha, later_alpha, later_alpha_second):
                         self.assertTrue(set(pp.OWNED_TOKENS).isdisjoint(get(pane).get("tokens", {})))
-                        self.assertNotEqual(get(pane).get("state_labels", {}).get("idle"), pp.LABEL)
+                        self.assertNotEqual(get(pane).get("state_labels", {}).get("idle"),
+                                            pp.LEGACY_PENDING_LABEL)
                     self.assertEqual(get(focused)["state_labels"]["idle"], "foreign idle")
                     report(blocked, "working")
                     wait(settled, "queued hooks after cleanup")

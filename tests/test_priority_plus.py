@@ -71,8 +71,9 @@ def increment(directory, sock):
 
 
 class LifecycleTests(unittest.TestCase):
-    def test_badge_labels_are_english(self):
-        self.assertEqual(pp.LABEL, "◉ Awaiting reply")
+    def test_only_subagent_badge_is_active(self):
+        self.assertFalse(hasattr(pp, "LABEL"))
+        self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
 
     def test_bootstrap_and_all_ranks(self):
@@ -263,36 +264,19 @@ class WatcherTests(unittest.TestCase):
     def pane_event(self, **pane):
         return {"event": "pane_updated", "data": {"type": "pane_updated", "pane": pane}}
 
-    def test_compaction_metadata_edges_require_reconciliation_until_badge_is_restored(self):
-        compacting = self.pane_event(
-            pane_id="w1:p1",
-            tokens={pp.TOKEN: pp.RANK_PENDING, pp.CONTEXT_TOKEN: pp.COMPACTION_LABEL},
-            state_labels={"idle": pp.LABEL},
-        )
-        self.assertTrue(pp.needs_reconcile_event(compacting))
-
-        suppressed = self.pane_event(
-            pane_id="w1:p1",
-            tokens={
-                pp.TOKEN: pp.RANK_PENDING,
-                pp.CONTEXT_TOKEN: pp.COMPACTION_LABEL,
-                pp.CONTEXT_SUPPRESSION_TOKEN: "1",
-            },
-        )
-        self.assertFalse(pp.needs_reconcile_event(suppressed))
-
-        finished = self.pane_event(
-            pane_id="w1:p1",
-            tokens={pp.TOKEN: pp.RANK_PENDING, pp.CONTEXT_SUPPRESSION_TOKEN: "1"},
-        )
-        self.assertTrue(pp.needs_reconcile_event(finished))
-
-        restored = self.pane_event(
+    def test_legacy_pending_badge_requires_reconciliation_until_removed(self):
+        legacy = self.pane_event(
             pane_id="w1:p1",
             tokens={pp.TOKEN: pp.RANK_PENDING},
-            state_labels={"idle": pp.LABEL},
+            state_labels={"idle": pp.LEGACY_PENDING_LABEL},
         )
-        self.assertFalse(pp.needs_reconcile_event(restored))
+        self.assertTrue(pp.needs_reconcile_event(legacy))
+
+        cleaned = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.TOKEN: pp.RANK_PENDING},
+        )
+        self.assertFalse(pp.needs_reconcile_event(cleaned))
 
     def test_only_subagent_metadata_edges_require_reconciliation(self):
         active = self.pane_event(
@@ -545,7 +529,8 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(self.writes(), [])
         self.client.agents[0].update(agent_status="idle", state_change_seq=2)
         self.sync()
-        self.assertEqual(self.writes()[0]["state_labels"], {"idle": pp.LABEL})
+        self.assertEqual(self.writes()[0]["tokens"], {pp.TOKEN: pp.RANK_PENDING})
+        self.assertNotIn("state_labels", self.writes()[0])
         self.client.calls.clear()
         self.client.agents[0]["state_labels"] = {"idle": "foreign later label"}
         self.sync()
@@ -554,7 +539,7 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         for fields in self.writes():
             self.assertEqual(fields["source"], pp.SOURCE)
-            self.assertTrue(fields["clear_state_labels"])
+            self.assertNotIn("clear_state_labels", fields)
             self.assertEqual(set(fields["tokens"]), {pp.TOKEN})
         self.assertEqual(self.client.agents[0]["tokens"]["foreign"], "keep")
 
@@ -588,44 +573,37 @@ class ReconciliationTests(unittest.TestCase):
         self.client.calls.clear()
         self.sync()
         self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
-        self.assertEqual(self.client.agents[0]["state_labels"], {"idle": pp.LABEL})
+        self.assertNotIn("state_labels", self.client.agents[0])
 
-    def test_compaction_suppresses_and_restores_pending_presentation(self):
+    def test_upgrade_removes_legacy_pending_presentation_and_token(self):
         completed = pp.observe(agent("done", 2))
+        completed["applied"] = pp.LEGACY_PENDING_LABEL
         self.state["agents"]["term-1"] = completed
         self.client.agents[0] = agent(
             "idle", 2,
-            tokens={pp.TOKEN: pp.RANK_PENDING, pp.CONTEXT_TOKEN: pp.COMPACTION_LABEL},
-            state_labels={"idle": pp.LABEL},
+            tokens={pp.TOKEN: pp.RANK_PENDING, pp.LEGACY_CONTEXT_SUPPRESSION_TOKEN: "1"},
+            state_labels={"idle": pp.LEGACY_PENDING_LABEL},
         )
 
         self.sync()
         record = self.state["agents"]["term-1"]
         self.assertTrue(record["pending"])
+        self.assertFalse(record["applied"])
         self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], pp.RANK_PENDING)
-        self.assertEqual(self.client.agents[0]["tokens"][pp.CONTEXT_TOKEN], pp.COMPACTION_LABEL)
-        self.assertEqual(self.client.agents[0]["tokens"][pp.CONTEXT_SUPPRESSION_TOKEN], "1")
+        self.assertNotIn(pp.LEGACY_CONTEXT_SUPPRESSION_TOKEN, self.client.agents[0]["tokens"])
         self.assertNotIn("state_labels", self.client.agents[0])
-
-        self.client.agents[0]["tokens"].pop(pp.CONTEXT_TOKEN)
-        self.client.calls.clear()
-        self.sync()
-        self.assertNotIn(pp.CONTEXT_SUPPRESSION_TOKEN, self.client.agents[0]["tokens"])
-        self.assertEqual(self.client.agents[0]["state_labels"], {"idle": pp.LABEL})
-        self.assertTrue(self.state["agents"]["term-1"]["pending"])
 
     def test_wait_and_later_suppress_and_restore_pending_presentation(self):
         for parked_label in ("WAIT/MP", "LATER/MP"):
             with self.subTest(parked_label=parked_label):
                 completed = pp.observe(agent("done", 2))
-                # Recover even if an older/buggy run persisted a false acknowledgement
-                # while its Awaiting reply contribution was still visible.
+                # Recover even if an older run left its pending-label contribution visible.
                 completed["applied"] = False
                 self.state["agents"]["term-1"] = completed
                 self.client.workspaces = [{"workspace_id": "parked", "label": parked_label}]
                 self.client.agents[0] = agent(
                     "idle", 2, workspace_id="parked", tokens={pp.TOKEN: "6"},
-                    state_labels={"idle": pp.LABEL},
+                    state_labels={"idle": pp.LEGACY_PENDING_LABEL},
                 )
                 self.sync()
                 record = self.state["agents"]["term-1"]
@@ -645,7 +623,7 @@ class ReconciliationTests(unittest.TestCase):
                 self.assertFalse(self.state["agents"]["term-1"]["waiting"])
                 self.assertIsNone(self.state["agents"]["term-1"]["parking"])
                 self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
-                self.assertEqual(self.client.agents[0]["state_labels"], {"idle": pp.LABEL})
+                self.assertNotIn("state_labels", self.client.agents[0])
 
     def test_all_ranks_follow_workspace_order(self):
         self.client.workspaces = [
@@ -816,25 +794,26 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(by_terminal[terminal]["tokens"][pp.WORKSPACE_TOKEN],
                              pp.workspace_order_key(position))
 
-    def test_upgrade_refreshes_applied_label_without_losing_completion(self):
+    def test_upgrade_clears_applied_pending_labels_without_losing_completion(self):
         self.sync()
         self.client.agents[0].update(agent_status="idle", state_change_seq=2)
         self.sync()
-        for old_applied in (True, "◉ Antwort offen"):
+        for old_applied in (True, "◉ Antwort offen", pp.LEGACY_PENDING_LABEL):
             with self.subTest(old_applied=old_applied):
                 self.state["agents"]["term-1"]["applied"] = old_applied
+                self.client.agents[0]["state_labels"] = {"idle": pp.LEGACY_PENDING_LABEL}
                 pp.save_state(self.path, self.state)
                 self.state = pp.load_state(self.path, "boot")
                 self.client.calls.clear()
                 self.sync()
                 self.assertEqual(self.writes(), [{
                     "pane_id": "w1:p1", "source": pp.SOURCE,
-                    "state_labels": {"idle": "◉ Awaiting reply"},
+                    "clear_state_labels": True,
                 }])
                 record = self.state["agents"]["term-1"]
                 self.assertTrue(record["pending"])
                 self.assertEqual(record["seq"], 2)
-                self.assertEqual(record["applied"], "◉ Awaiting reply")
+                self.assertFalse(record["applied"])
                 self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
                 self.client.calls.clear()
                 self.sync()
@@ -860,7 +839,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(self.state["agents"]["term-1"]["applied"])
         self.client.fail = None
         self.sync()
-        self.assertEqual(self.state["agents"]["term-1"]["applied"], pp.LABEL)
+        self.assertFalse(self.state["agents"]["term-1"]["applied"])
 
     def test_pane_closed_during_write_is_tolerated(self):
         self.client.fail = "pane_not_found"
@@ -963,7 +942,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.6.1")
+        self.assertEqual(manifest["version"], "0.7.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

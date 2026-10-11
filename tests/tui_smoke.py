@@ -42,7 +42,7 @@ status_indicators = "symbols"
 [ui.sound]
 enabled = false
 [ui.sidebar.agents]
-rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳ Subagent working", fg = "#268bd2", bold = true }, { equals = "◉ Awaiting reply", fg = "#b58900", bold = true }, { contains = "", hide = true }] }]]
+rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳ Subagent working", fg = "#268bd2", bold = true }, { contains = "", hide = true }] }]]
 ''')
 
     def rpc(method, params=None):
@@ -280,9 +280,7 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                     if name in parked_names:
                         tokens['pp_session_sort'] = parked_names[name]
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': tokens}
-                    if name in ['UNREAD', 'REVIEWED']:
-                        params['state_labels'] = {'idle': '◉ Awaiting reply'}
-                    elif name == 'SUBAGENT':
+                    if name == 'SUBAGENT':
                         params['state_labels'] = {'idle': '⏳ Subagent working'}
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
@@ -294,7 +292,7 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
             order = fixture_order(lines)
             assert order[:5] == expected_prefix, order
             assert order[5:] == expected_suffix, order
-            assert not any('Awaiting reply' in line for line in lines), 'Badge must stay hidden for unseen completions'
+            assert not any('Awaiting reply' in line for line in lines)
             assert sum('⏳ Subagent working' in line for line in lines) == 1
             for parked_name in (
                 'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
@@ -309,39 +307,10 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
             order = fixture_order(lines)
             assert order[:5] == expected_prefix, order
             assert order[5:] == expected_suffix, order
-            assert sum('◉ Awaiting reply' in line for line in lines) == 1, 'Exactly the reviewed completion needs a badge'
-            if args.plugin:
-                rpc('pane.report_metadata', {
-                    'pane_id': panes['REVIEWED'], 'source': 'pi:context-attention',
-                    'tokens': {'pica_context': '⌛ Compacting context'},
-                })
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    pump(.1)
-                    pane = rpc('pane.get', {'pane_id': panes['REVIEWED']})['pane']
-                    if (pane.get('tokens', {}).get('pp_context_suppressed') == '1'
-                            and pane.get('state_labels', {}).get('idle') != '◉ Awaiting reply'):
-                        break
-                assert pane.get('tokens', {}).get('pp_context_suppressed') == '1'
-                lines = capture('during_context_compaction')
-                assert not any('Awaiting reply' in line for line in lines)
-                rpc('pane.report_metadata', {
-                    'pane_id': panes['REVIEWED'], 'source': 'pi:context-attention',
-                    'tokens': {'pica_context': None},
-                })
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    pump(.1)
-                    pane = rpc('pane.get', {'pane_id': panes['REVIEWED']})['pane']
-                    if ('pp_context_suppressed' not in pane.get('tokens', {})
-                            and pane.get('state_labels', {}).get('idle') == '◉ Awaiting reply'):
-                        break
-                assert 'pp_context_suppressed' not in pane.get('tokens', {})
-                lines = capture('after_context_compaction')
-                assert sum('◉ Awaiting reply' in line for line in lines) == 1
+            assert not any('Awaiting reply' in line for line in lines)
             rpc('pane.send_text', {'pane_id': panes['REVIEWED'], 'text': 'draft-not-submitted'})
             lines = capture('after_typing_only')
-            assert sum('◉ Awaiting reply' in line for line in lines) == 1
+            assert not any('Awaiting reply' in line for line in lines)
             report(panes['REVIEWED'], 'working')
             if not args.plugin:
                 rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '5'}})

@@ -23,10 +23,8 @@ SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
 WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
-CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
-OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, CONTEXT_SUPPRESSION_TOKEN)
-CONTEXT_TOKEN = "pica_context"
-COMPACTION_LABEL = "⌛ Compacting context"
+LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
+OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
 RANK_WORKING = "5"
@@ -35,10 +33,10 @@ RANK_IDLE = "3"
 RANK_LATER = "2"
 RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
-LABEL = "◉ Awaiting reply"
+LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.6.1"
+WATCHER_VERSION = "0.7.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -317,11 +315,6 @@ def has_active_subagents(agent, active_sessions=None):
     return isinstance(session, str) and session in (active_sessions or ())
 
 
-def is_context_compacting(agent):
-    tokens = agent.get("tokens") or {}
-    return isinstance(tokens, dict) and tokens.get(CONTEXT_TOKEN) == COMPACTION_LABEL
-
-
 def needs_reconcile_event(message):
     """Select metadata-only presentation edges omitted from plugin hooks."""
     if not isinstance(message, dict):
@@ -341,11 +334,7 @@ def needs_reconcile_event(message):
     labels = pane.get("state_labels") or {}
     if not isinstance(labels, dict):
         labels = {}
-    context_suppressed = tokens.get(CONTEXT_SUPPRESSION_TOKEN) == "1"
-    if is_context_compacting(pane):
-        return (labels.get("idle") == LABEL
-                or (tokens.get(TOKEN) == RANK_PENDING and not context_suppressed))
-    if context_suppressed:
+    if labels.get("idle") == LEGACY_PENDING_LABEL:
         return True
     if has_active_subagents(pane):
         return (tokens.get(TOKEN) != RANK_SUBAGENT
@@ -439,7 +428,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None):
         pending = (previous["pending"] or previous["status"] in ("working", "blocked")
                    or seq > previous["seq"])
     # Working/blocked/unknown are not a completed run. Keep the underlying
-    # pending flag while a child runs so Awaiting reply can return afterwards.
+    # pending flag while a child runs so its completion priority can return afterwards.
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
             "subagent": has_active_subagents(agent, active_sessions), "waiting": parking is not None,
             "parking": parking, "applied": previous.get("applied") if previous else None}
@@ -518,13 +507,11 @@ def reconcile(client, state, path):
         desired = rank(record)
         fields = {}
         current_tokens = agent.get("tokens", {})
-        suppress_for_compaction = (not record["subagent"] and record["pending"]
-                                   and not record["waiting"] and is_context_compacting(agent))
         desired_tokens = {
             TOKEN: desired,
             WORKSPACE_TOKEN: None,
             SESSION_TOKEN: None,
-            CONTEXT_SUPPRESSION_TOKEN: "1" if suppress_for_compaction else None,
+            LEGACY_CONTEXT_SUPPRESSION_TOKEN: None,
         }
         position = workspace_order.get(agent.get("workspace_id"))
         if position is not None:
@@ -541,8 +528,7 @@ def reconcile(client, state, path):
         }
         if token_updates:
             fields["tokens"] = token_updates
-        # Cache the emitted text, not just a boolean: upgrades can refresh
-        # an existing badge without resetting its pending completion.
+        # Cache the emitted text so subagent labels are updated idempotently.
         if record["subagent"]:
             label_state = SUBAGENT_LABEL
             labels = agent.get("state_labels") or {}
@@ -552,15 +538,11 @@ def reconcile(client, state, path):
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         else:
-            label_state = (LABEL if record["pending"] and not record["waiting"]
-                           and not suppress_for_compaction else False)
+            label_state = False
             labels = agent.get("state_labels") or {}
-            stale_badge = not label_state and labels.get("idle") == LABEL
+            stale_badge = labels.get("idle") == LEGACY_PENDING_LABEL
             if record["applied"] != label_state or stale_badge:
-                if label_state:
-                    fields["state_labels"] = {"idle": LABEL}
-                else:
-                    fields["clear_state_labels"] = True
+                fields["clear_state_labels"] = True
         if fields:
             if not metadata(client, agent["pane_id"], **fields):
                 continue
