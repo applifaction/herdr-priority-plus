@@ -263,22 +263,13 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                     'WAIT_ALPHA_Z': 0,
                     'WAITING': 3,
                 }
-                parked_names = {
-                    'LATER_ALPHA_A': 'later_alpha_a',
-                    'LATER_ALPHA_Z': 'later_alpha_z',
-                    'DEFERRED': 'deferred',
-                    'WAIT_ALPHA_A': 'wait_alpha_a',
-                    'WAIT_ALPHA_Z': 'wait_alpha_z',
-                    'WAITING': 'waiting',
-                }
                 for name, rank in ranks.items():
                     position = workspace_positions.get(name, 1)
                     tokens = {
                         'pp_rank': rank,
                         'pp_workspace_sort': f'{position:020d}',
+                        'pp_session_sort': name.casefold(),
                     }
-                    if name in parked_names:
-                        tokens['pp_session_sort'] = parked_names[name]
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': tokens}
                     if name == 'SUBAGENT':
                         params['state_labels'] = {'idle': '⏳ Subagent working'}

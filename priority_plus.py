@@ -36,7 +36,7 @@ RANK_UNKNOWN = "0"
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.7.0"
+WATCHER_VERSION = "0.8.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -516,10 +516,9 @@ def reconcile(client, state, path):
         position = workspace_order.get(agent.get("workspace_id"))
         if position is not None:
             desired_tokens[WORKSPACE_TOKEN] = workspace_order_key(position)
-        if desired in (RANK_LATER, RANK_WAIT):
-            session_label = tab_label_by_id.get(agent.get("tab_id"))
-            if isinstance(session_label, str):
-                desired_tokens[SESSION_TOKEN] = metadata_sort_key(session_label)
+        session_label = tab_label_by_id.get(agent.get("tab_id"))
+        if isinstance(session_label, str):
+            desired_tokens[SESSION_TOKEN] = metadata_sort_key(session_label)
         token_updates = {
             token: value
             for token, value in desired_tokens.items()

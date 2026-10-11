@@ -625,7 +625,7 @@ class ReconciliationTests(unittest.TestCase):
                 self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
                 self.assertNotIn("state_labels", self.client.agents[0])
 
-    def test_all_ranks_follow_workspace_order(self):
+    def test_all_ranks_follow_workspace_order_and_tab_name(self):
         self.client.workspaces = [
             {"workspace_id": "z-first", "label": "Zulu first"},
             {"workspace_id": "a-second", "label": "Alpha second"},
@@ -652,6 +652,16 @@ class ReconciliationTests(unittest.TestCase):
             agent("unknown", terminal_id="second-unknown", pane_id="a-second:p6",
                   workspace_id="a-second", tab_id="a-second:t6"),
         ]
+        self.client.tabs = [
+            {"tab_id": "z-first:t1", "workspace_id": "z-first", "label": "Zulu result"},
+            {"tab_id": "z-first:t2", "workspace_id": "z-first", "label": "alpha result"},
+            {"tab_id": "a-second:t1", "workspace_id": "a-second", "label": "Pending"},
+            {"tab_id": "a-second:t2", "workspace_id": "a-second", "label": "Working"},
+            {"tab_id": "a-second:t3", "workspace_id": "a-second", "label": "Idle"},
+            {"tab_id": "a-second:t4", "workspace_id": "a-second", "label": "Blocked"},
+            {"tab_id": "a-second:t5", "workspace_id": "a-second", "label": "Subagent"},
+            {"tab_id": "a-second:t6", "workspace_id": "a-second", "label": "Unknown"},
+        ]
         self.state["agents"]["first-reviewed"] = pp.observe(agent(
             "done", terminal_id="first-reviewed", pane_id="z-first:p2",
             workspace_id="z-first", tab_id="z-first:t2"))
@@ -662,28 +672,35 @@ class ReconciliationTests(unittest.TestCase):
         second_key = pp.workspace_order_key(1)
         self.assertEqual(by_terminal["first-unread"]["tokens"], {
             pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: first_key,
+            pp.SESSION_TOKEN: "zulu result",
         })
         self.assertEqual(by_terminal["first-reviewed"]["tokens"], {
             pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: first_key,
+            pp.SESSION_TOKEN: "alpha result",
         })
         self.assertEqual(by_terminal["second-unread"]["tokens"], {
             pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: second_key,
+            pp.SESSION_TOKEN: "pending",
         })
         self.assertEqual(by_terminal["second-working"]["tokens"], {
             pp.TOKEN: pp.RANK_WORKING, pp.WORKSPACE_TOKEN: second_key,
+            pp.SESSION_TOKEN: "working",
         })
         self.assertEqual(by_terminal["second-idle"]["tokens"], {
             pp.TOKEN: pp.RANK_IDLE, pp.WORKSPACE_TOKEN: second_key,
+            pp.SESSION_TOKEN: "idle",
         })
         self.assertEqual(by_terminal["second-blocked"]["tokens"], {
             pp.TOKEN: pp.RANK_BLOCKED, pp.WORKSPACE_TOKEN: second_key,
+            pp.SESSION_TOKEN: "blocked",
         })
         self.assertEqual(by_terminal["second-subagent"]["tokens"], {
             "summary": "⏳ 1 subagent", pp.TOKEN: pp.RANK_SUBAGENT,
-            pp.WORKSPACE_TOKEN: second_key,
+            pp.WORKSPACE_TOKEN: second_key, pp.SESSION_TOKEN: "subagent",
         })
         self.assertEqual(by_terminal["second-unknown"]["tokens"], {
             pp.TOKEN: pp.RANK_UNKNOWN, pp.WORKSPACE_TOKEN: second_key,
+            pp.SESSION_TOKEN: "unknown",
         })
 
         self.client.workspaces.reverse()
@@ -694,7 +711,7 @@ class ReconciliationTests(unittest.TestCase):
                          "second-blocked", "second-subagent", "second-unknown"):
             self.assertEqual(by_terminal[terminal]["tokens"][pp.WORKSPACE_TOKEN], first_key)
 
-    def test_parked_agents_get_visible_workspace_and_alphabetical_session_tokens(self):
+    def test_all_agents_get_visible_workspace_and_alphabetical_session_tokens(self):
         self.client.agents = [
             agent("idle", terminal_id="later-z", pane_id="later-z:p1",
                   workspace_id="later-z", tab_id="later-z:t1"),
@@ -747,16 +764,17 @@ class ReconciliationTests(unittest.TestCase):
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key, "pp_session_sort": "alpha session",
         })
         self.assertEqual(by_terminal["normal"]["tokens"], {
-            pp.TOKEN: "3", pp.WORKSPACE_TOKEN: normal_key,
+            pp.TOKEN: "3", pp.WORKSPACE_TOKEN: normal_key, pp.SESSION_TOKEN: "normal",
         })
         self.assertEqual(by_terminal["later-working"]["tokens"], {
-            pp.TOKEN: "5", pp.WORKSPACE_TOKEN: later_a_key,
+            pp.TOKEN: "5", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "working",
         })
         self.assertEqual(by_terminal["later-blocked"]["tokens"], {
-            pp.TOKEN: "7", pp.WORKSPACE_TOKEN: later_a_key,
+            pp.TOKEN: "7", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "blocked",
         })
         self.assertEqual(by_terminal["later-subagent"]["tokens"], {
             "summary": "⏳ 1 subagent", pp.TOKEN: "4", pp.WORKSPACE_TOKEN: later_a_key,
+            pp.SESSION_TOKEN: "subagent",
         })
         self.assertEqual(by_terminal["later-missing-tab"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key,
@@ -942,7 +960,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.7.0")
+        self.assertEqual(manifest["version"], "0.8.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

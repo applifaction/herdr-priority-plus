@@ -142,6 +142,7 @@ class RealHerdrTests(unittest.TestCase):
                     background = fixture("background")
                     blocked = fixture("blocked")
                     plain = fixture("plain-idle")
+                    call("tab.rename", tab_id=get(plain)["tab_id"], label="Zulu normal")
                     working = fixture("working")
                     subagent = fixture("subagent")
                     waiting = fixture("WAIT/fixture")
@@ -184,6 +185,10 @@ class RealHerdrTests(unittest.TestCase):
                     evidence.append("parked agent tokens follow Spaces order then live tab/session label")
                     report(plain, "idle")
                     expect_rank(plain, "3")
+                    expect_sort_tokens(plain, "Zulu normal")
+                    call("tab.rename", tab_id=get(plain)["tab_id"], label="Aardvark normal")
+                    expect_sort_tokens(plain, "Aardvark normal")
+                    evidence.append("ordinary sessions also follow live alphabetical tab-name sorting")
                     self.assertNotEqual(get(plain).get("state_labels", {}).get("idle"),
                                         pp.LEGACY_PENDING_LABEL)
                     report(working, "working")
