@@ -243,7 +243,10 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                 rpc('pane.report_metadata', {'pane_id': panes['SUBAGENT'], 'source': 'pi-subagents:herdr',
                     'tokens': {'summary': summary},
                     'state_labels': {state: summary for state in ['idle', 'done', 'working']}})
-                pump(1)
+                # Collapse the preceding lifecycle-event burst into one acknowledged
+                # full reconciliation before asserting the visual order.
+                action('enable')
+                pump(.3)
             else:
                 ranks = {
                     'BLOCKED': '7', 'UNREAD': '6', 'REVIEWED': '6', 'RUNNING': '5',
@@ -307,6 +310,35 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
             assert order[:5] == expected_prefix, order
             assert order[5:] == expected_suffix, order
             assert sum('◉ Awaiting reply' in line for line in lines) == 1, 'Exactly the reviewed completion needs a badge'
+            if args.plugin:
+                rpc('pane.report_metadata', {
+                    'pane_id': panes['REVIEWED'], 'source': 'pi:context-attention',
+                    'tokens': {'pica_context': '⌛ Compacting context'},
+                })
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    pump(.1)
+                    pane = rpc('pane.get', {'pane_id': panes['REVIEWED']})['pane']
+                    if (pane.get('tokens', {}).get('pp_context_suppressed') == '1'
+                            and pane.get('state_labels', {}).get('idle') != '◉ Awaiting reply'):
+                        break
+                assert pane.get('tokens', {}).get('pp_context_suppressed') == '1'
+                lines = capture('during_context_compaction')
+                assert not any('Awaiting reply' in line for line in lines)
+                rpc('pane.report_metadata', {
+                    'pane_id': panes['REVIEWED'], 'source': 'pi:context-attention',
+                    'tokens': {'pica_context': None},
+                })
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    pump(.1)
+                    pane = rpc('pane.get', {'pane_id': panes['REVIEWED']})['pane']
+                    if ('pp_context_suppressed' not in pane.get('tokens', {})
+                            and pane.get('state_labels', {}).get('idle') == '◉ Awaiting reply'):
+                        break
+                assert 'pp_context_suppressed' not in pane.get('tokens', {})
+                lines = capture('after_context_compaction')
+                assert sum('◉ Awaiting reply' in line for line in lines) == 1
             rpc('pane.send_text', {'pane_id': panes['REVIEWED'], 'text': 'draft-not-submitted'})
             lines = capture('after_typing_only')
             assert sum('◉ Awaiting reply' in line for line in lines) == 1

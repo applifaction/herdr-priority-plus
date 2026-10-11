@@ -202,6 +202,38 @@ class RealHerdrTests(unittest.TestCase):
                         self.assertEqual(get(pane)["title"], "foreign title")
                         self.assertEqual(get(pane)["state_labels"]["working"], "foreign work")
                     self.assertEqual(get(background)["agent_status"], "done")
+                    call(
+                        "pane.report_metadata",
+                        pane_id=background,
+                        source="pi:context-attention",
+                        tokens={pp.CONTEXT_TOKEN: pp.COMPACTION_LABEL},
+                    )
+                    wait(
+                        lambda: get(background).get("tokens", {}).get(
+                            pp.CONTEXT_SUPPRESSION_TOKEN
+                        ) == "1",
+                        "compaction suppression token",
+                    )
+                    wait(
+                        lambda: get(background).get("state_labels", {}).get("idle") != pp.LABEL,
+                        "compaction hides awaiting label",
+                    )
+                    self.assertEqual(get(background)["tokens"][pp.TOKEN], pp.RANK_PENDING)
+                    call(
+                        "pane.report_metadata",
+                        pane_id=background,
+                        source="pi:context-attention",
+                        tokens={pp.CONTEXT_TOKEN: None},
+                    )
+                    wait(
+                        lambda: pp.CONTEXT_SUPPRESSION_TOKEN not in get(background).get("tokens", {}),
+                        "compaction suppression clears",
+                    )
+                    wait(
+                        lambda: get(background).get("state_labels", {}).get("idle") == pp.LABEL,
+                        "awaiting label returns after compaction",
+                    )
+                    evidence.append("context compaction hides Awaiting reply and restores it afterwards")
                     for pane in (focused, background, working, blocked, plain,
                                  later_alpha, later_alpha_second, waiting_alpha):
                         expect_workspace_token(pane)

@@ -23,7 +23,10 @@ SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
 WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
-OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN)
+CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
+OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, CONTEXT_SUPPRESSION_TOKEN)
+CONTEXT_TOKEN = "pica_context"
+COMPACTION_LABEL = "⌛ Compacting context"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
 RANK_WORKING = "5"
@@ -35,7 +38,7 @@ RANK_UNKNOWN = "0"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.6.0"
+WATCHER_VERSION = "0.6.1"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -314,8 +317,13 @@ def has_active_subagents(agent, active_sessions=None):
     return isinstance(session, str) and session in (active_sessions or ())
 
 
+def is_context_compacting(agent):
+    tokens = agent.get("tokens") or {}
+    return isinstance(tokens, dict) and tokens.get(CONTEXT_TOKEN) == COMPACTION_LABEL
+
+
 def needs_reconcile_event(message):
-    """Select the metadata-only subagent edges omitted from plugin hooks."""
+    """Select metadata-only presentation edges omitted from plugin hooks."""
     if not isinstance(message, dict):
         return False
     data = message.get("data")
@@ -330,10 +338,17 @@ def needs_reconcile_event(message):
     tokens = pane.get("tokens") or {}
     if not isinstance(tokens, dict):
         return False
+    labels = pane.get("state_labels") or {}
+    if not isinstance(labels, dict):
+        labels = {}
+    context_suppressed = tokens.get(CONTEXT_SUPPRESSION_TOKEN) == "1"
+    if is_context_compacting(pane):
+        return (labels.get("idle") == LABEL
+                or (tokens.get(TOKEN) == RANK_PENDING and not context_suppressed))
+    if context_suppressed:
+        return True
     if has_active_subagents(pane):
-        labels = pane.get("state_labels") or {}
         return (tokens.get(TOKEN) != RANK_SUBAGENT
-                or not isinstance(labels, dict)
                 or any(labels.get(status) != SUBAGENT_LABEL for status in SUBAGENT_STATES))
     # The rank is our durable edge marker after pi-subagents removes summary.
     return tokens.get(TOKEN) == RANK_SUBAGENT
@@ -503,7 +518,14 @@ def reconcile(client, state, path):
         desired = rank(record)
         fields = {}
         current_tokens = agent.get("tokens", {})
-        desired_tokens = {TOKEN: desired, WORKSPACE_TOKEN: None, SESSION_TOKEN: None}
+        suppress_for_compaction = (not record["subagent"] and record["pending"]
+                                   and not record["waiting"] and is_context_compacting(agent))
+        desired_tokens = {
+            TOKEN: desired,
+            WORKSPACE_TOKEN: None,
+            SESSION_TOKEN: None,
+            CONTEXT_SUPPRESSION_TOKEN: "1" if suppress_for_compaction else None,
+        }
         position = workspace_order.get(agent.get("workspace_id"))
         if position is not None:
             desired_tokens[WORKSPACE_TOKEN] = workspace_order_key(position)
@@ -530,7 +552,8 @@ def reconcile(client, state, path):
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         else:
-            label_state = LABEL if record["pending"] and not record["waiting"] else False
+            label_state = (LABEL if record["pending"] and not record["waiting"]
+                           and not suppress_for_compaction else False)
             labels = agent.get("state_labels") or {}
             stale_badge = not label_state and labels.get("idle") == LABEL
             if record["applied"] != label_state or stale_badge:
