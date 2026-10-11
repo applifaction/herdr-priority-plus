@@ -35,7 +35,7 @@ RANK_UNKNOWN = "0"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.3.1"
+WATCHER_VERSION = "0.3.2"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -43,7 +43,7 @@ SUBAGENT_STATUS_SCAN_LIMIT = 512
 SUBAGENT_STATUS_STALE_SECONDS = 10 * 60
 ACTIVE_RUN_STATES = ("queued", "running")
 TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
-SUBAGENT_STATES = ("idle", "done", "working")
+SUBAGENT_STATES = ("blocked", "idle", "done", "working")
 SUBAGENT_SUMMARY = re.compile(r"^⏳ [1-9][0-9]* subagents?(?: \([^()\n]*\))?$")
 VIEW = {
     "source": SOURCE,

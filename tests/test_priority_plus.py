@@ -565,6 +565,7 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "4")
         self.assertEqual(self.client.agents[0]["state_labels"], {
+            "blocked": pp.SUBAGENT_LABEL,
             "idle": pp.SUBAGENT_LABEL,
             "done": pp.SUBAGENT_LABEL,
             "working": pp.SUBAGENT_LABEL,
@@ -849,7 +850,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.3.1")
+        self.assertEqual(manifest["version"], "0.3.2")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
