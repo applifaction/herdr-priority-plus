@@ -118,11 +118,15 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
         return rpc('pane.report_agent', {'pane_id': pane, 'source': 'test:priority-plus', 'agent': 'pi', 'state': state})
 
     def action(name):
-        before = {entry['log_id'] for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']}
         deadline = time.monotonic() + 15
+        log_id = None
         while True:
             done = subprocess.run([herdr, 'plugin', 'action', 'invoke', 'local.priority-plus.'+name], env=env, capture_output=True, text=True, timeout=8)
             if not done.returncode:
+                try:
+                    log_id = json.loads(done.stdout)['result']['log']['log_id']
+                except (KeyError, TypeError, ValueError) as error:
+                    raise RuntimeError(f'cannot read accepted {name} log id: {done.stdout}') from error
                 break
             failure = done.stdout + done.stderr
             if 'plugin_command_limit_reached' not in failure or time.monotonic() >= deadline:
@@ -131,13 +135,12 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             pump(.1)
-            fresh = [entry for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']
-                     if entry['log_id'] not in before and entry.get('action_id') == name]
-            if any(entry['status'] == 'succeeded' for entry in fresh):
+            entry = next((entry for entry in rpc('plugin.log.list', {'plugin_id': 'local.priority-plus'})['logs']
+                          if entry['log_id'] == log_id), None)
+            if entry and entry['status'] == 'succeeded':
                 return
-            failed = next((entry for entry in fresh if entry['status'] == 'failed'), None)
-            if failed:
-                raise RuntimeError(failed.get('stderr') or f'{name} failed')
+            if entry and entry['status'] == 'failed':
+                raise RuntimeError(entry.get('stderr') or f'{name} failed')
         raise RuntimeError(f'timed out waiting for {name}')
 
     try:
@@ -155,10 +158,16 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
             first = rpc('workspace.create', {'cwd': temp, 'label': 'fixture', 'focus': True})
             ws = first['workspace']['workspace_id']
             panes = {}
-            for name in ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE']:
+            for name in ['BLOCKED', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE']:
                 created = rpc('tab.create', {'workspace_id': ws, 'label': name, 'cwd': temp, 'focus': False})
                 panes[name] = created['root_pane']['pane_id']
                 report(panes[name], 'idle')
+            unread_created = rpc('workspace.create', {
+                'cwd': temp, 'label': 'action-lower', 'focus': False,
+            })
+            panes['UNREAD'] = unread_created['root_pane']['pane_id']
+            rpc('tab.rename', {'tab_id': unread_created['root_pane']['tab_id'], 'label': 'UNREAD'})
+            report(panes['UNREAD'], 'idle')
             wait_created = rpc('workspace.create', {'cwd': temp, 'label': 'WAIT/FIXTURE', 'focus': False})
             panes['WAITING'] = wait_created['root_pane']['pane_id']
             rpc('tab.rename', {'tab_id': wait_created['root_pane']['tab_id'], 'label': 'WAITING'})
@@ -194,11 +203,6 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
             pump(.2)
             if args.plugin:
                 action('enable')
-                workspace_labels = [workspace['label'] for workspace in rpc('workspace.list')['workspaces']]
-                assert workspace_labels[-4:] == [
-                    'LATER/ALPHA', 'LATER/FIXTURE', 'WAIT/ALPHA', 'WAIT/FIXTURE',
-                ], workspace_labels
-                assert workspace_labels.index('normal-after-parked') < workspace_labels.index('LATER/ALPHA')
             else:
                 rpc('agent.view.set', {'source': 'test:priority-plus', 'label': 'Priority+', 'sort': [
                     {'field': {'token': 'pp_rank'}, 'order': 'desc'},
@@ -207,6 +211,15 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                     {'field': 'seen', 'order': 'asc'},
                     {'field': 'state_change_seq', 'order': 'desc'},
                 ]})
+            rpc('workspace.move', {
+                'workspace_id': wait_alpha['workspace']['workspace_id'], 'insert_index': 0,
+            })
+            pump(.5)
+            workspace_labels = [workspace['label'] for workspace in rpc('workspace.list')['workspaces']]
+            assert workspace_labels == [
+                'WAIT/ALPHA', 'fixture', 'action-lower', 'WAIT/FIXTURE',
+                'LATER/FIXTURE', 'LATER/ALPHA', 'normal-after-parked',
+            ], workspace_labels
             for name in [
                 'BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'DEFERRED', 'WAITING',
                 'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'WAIT_ALPHA_A', 'WAIT_ALPHA_Z',
@@ -238,18 +251,31 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                     'LATER_ALPHA_Z': '2', 'DEFERRED': '2', 'WAIT_ALPHA_A': '1',
                     'WAIT_ALPHA_Z': '1', 'WAITING': '1',
                 }
+                workspace_positions = {
+                    'UNREAD': 2,
+                    'LATER_ALPHA_A': 5,
+                    'LATER_ALPHA_Z': 5,
+                    'DEFERRED': 4,
+                    'WAIT_ALPHA_A': 0,
+                    'WAIT_ALPHA_Z': 0,
+                    'WAITING': 3,
+                }
                 parked_names = {
-                    'LATER_ALPHA_A': ('later/alpha', 'later_alpha_a'),
-                    'LATER_ALPHA_Z': ('later/alpha', 'later_alpha_z'),
-                    'DEFERRED': ('later/fixture', 'deferred'),
-                    'WAIT_ALPHA_A': ('wait/alpha', 'wait_alpha_a'),
-                    'WAIT_ALPHA_Z': ('wait/alpha', 'wait_alpha_z'),
-                    'WAITING': ('wait/fixture', 'waiting'),
+                    'LATER_ALPHA_A': 'later_alpha_a',
+                    'LATER_ALPHA_Z': 'later_alpha_z',
+                    'DEFERRED': 'deferred',
+                    'WAIT_ALPHA_A': 'wait_alpha_a',
+                    'WAIT_ALPHA_Z': 'wait_alpha_z',
+                    'WAITING': 'waiting',
                 }
                 for name, rank in ranks.items():
-                    tokens = {'pp_rank': rank}
+                    position = workspace_positions.get(name, 1)
+                    tokens = {
+                        'pp_rank': rank,
+                        'pp_workspace_sort': f'{position:020d}',
+                    }
                     if name in parked_names:
-                        tokens['pp_workspace_sort'], tokens['pp_session_sort'] = parked_names[name]
+                        tokens['pp_session_sort'] = parked_names[name]
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': tokens}
                     if name in ['UNREAD', 'REVIEWED']:
                         params['state_labels'] = {'idle': '◉ Awaiting reply'}
@@ -257,9 +283,9 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⏳
                         params['state_labels'] = {'idle': '⏳ Subagent working'}
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
-            expected_prefix = ['BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT']
+            expected_prefix = ['BLOCKED', 'REVIEWED', 'UNREAD', 'RUNNING', 'SUBAGENT']
             expected_suffix = [
-                'IDLE', 'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
+                'IDLE', 'DEFERRED', 'LATER_ALPHA_A', 'LATER_ALPHA_Z',
                 'WAIT_ALPHA_A', 'WAIT_ALPHA_Z', 'WAITING',
             ]
             order = fixture_order(lines)

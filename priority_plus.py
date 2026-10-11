@@ -35,12 +35,13 @@ RANK_UNKNOWN = "0"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.3.3"
+WATCHER_VERSION = "0.6.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
 SUBAGENT_STATUS_SCAN_LIMIT = 512
 SUBAGENT_STATUS_STALE_SECONDS = 10 * 60
+METADATA_TOKEN_CHAR_LIMIT = 80
 ACTIVE_RUN_STATES = ("queued", "running")
 TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
 SUBAGENT_STATES = ("blocked", "idle", "done", "working")
@@ -224,28 +225,14 @@ def alphabetical_key(value):
     return value.casefold() if isinstance(value, str) else ""
 
 
-def reconcile_workspace_order(client, workspaces):
-    """Keep normal workspaces stable and parked groups alphabetized."""
-    groups = {None: [], "later": [], "wait": []}
-    for workspace in workspaces:
-        groups[workspace_parking_kind(workspace.get("label"))].append(workspace)
-    groups["later"].sort(key=lambda workspace: alphabetical_key(workspace.get("label")))
-    groups["wait"].sort(key=lambda workspace: alphabetical_key(workspace.get("label")))
-    desired = groups[None] + groups["later"] + groups["wait"]
-    current_ids = [workspace["workspace_id"] for workspace in workspaces]
-    desired_ids = [workspace["workspace_id"] for workspace in desired]
-    if current_ids == desired_ids:
-        return False
-    parked_ids = [workspace["workspace_id"] for workspace in groups["later"] + groups["wait"]]
-    try:
-        client.call("workspace.move_block", {"workspace_ids": parked_ids})
-    except ApiError as error:
-        # A workspace can close after workspace.list. Its lifecycle hook will
-        # retry against a fresh authoritative snapshot.
-        if error.code == "workspace_not_found":
-            return False
-        raise
-    return True
+def metadata_sort_key(value):
+    """Match Herdr's bounded metadata token storage."""
+    return alphabetical_key(value)[:METADATA_TOKEN_CHAR_LIMIT]
+
+
+def workspace_order_key(position):
+    """Lexically sortable position in the visible workspace list."""
+    return f"{position:020d}"
 
 
 def process_predates_run(pid, started_at_ms):
@@ -482,13 +469,15 @@ def reconcile(client, state, path):
     agents = client.call("agent.list")["agents"]
     workspaces = client.call("workspace.list")["workspaces"]
     tabs = client.call("tab.list")["tabs"]
-    if state["enabled"]:
-        reconcile_workspace_order(client, workspaces)
     workspace_by_id = {workspace["workspace_id"]: workspace for workspace in workspaces}
     parking_by_workspace = {
         workspace_id: workspace_parking_kind(workspace.get("label"))
         for workspace_id, workspace in workspace_by_id.items()
         if is_parked_workspace(workspace.get("label"))
+    }
+    workspace_order = {
+        workspace["workspace_id"]: position
+        for position, workspace in enumerate(workspaces)
     }
     tab_label_by_id = {tab["tab_id"]: tab.get("label") for tab in tabs}
     previous = state["agents"]
@@ -515,12 +504,13 @@ def reconcile(client, state, path):
         fields = {}
         current_tokens = agent.get("tokens", {})
         desired_tokens = {TOKEN: desired, WORKSPACE_TOKEN: None, SESSION_TOKEN: None}
+        position = workspace_order.get(agent.get("workspace_id"))
+        if position is not None:
+            desired_tokens[WORKSPACE_TOKEN] = workspace_order_key(position)
         if desired in (RANK_LATER, RANK_WAIT):
-            workspace = workspace_by_id.get(agent.get("workspace_id"), {})
-            desired_tokens[WORKSPACE_TOKEN] = alphabetical_key(workspace.get("label"))
             session_label = tab_label_by_id.get(agent.get("tab_id"))
             if isinstance(session_label, str):
-                desired_tokens[SESSION_TOKEN] = alphabetical_key(session_label)
+                desired_tokens[SESSION_TOKEN] = metadata_sort_key(session_label)
         token_updates = {
             token: value
             for token, value in desired_tokens.items()

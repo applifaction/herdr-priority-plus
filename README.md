@@ -14,7 +14,7 @@
 
 A small [Herdr](https://herdr.dev) plugin that keeps **viewed completions above running agents** until the next work cycle. Opening a finished session no longer means losing track of it at the bottom of your queue.
 
-Built for multi-session Pi workflows, Priority+ uses Herdr's lifecycle and display metadata—not transcript scanning. It adds conditional **awaiting-reply** and **subagent-working** badges plus a toggleable Agents view. Native status icons stay unchanged.
+Built for multi-session Pi workflows, Priority+ uses Herdr's lifecycle and display metadata—not transcript scanning. Inside every priority tier, it groups sessions by the visible **Spaces order**, adds conditional **awaiting-reply** and **subagent-working** badges, and provides a toggleable Agents view. Native status icons stay unchanged.
 
 With Herdr's symbol indicators enabled:
 
@@ -40,8 +40,8 @@ The badges read **`◉ Awaiting reply`** and **`⏳ Subagent working`**. Plugin 
 | Priority | Session state | Behavior |
 | --- | --- | --- |
 | 1 | Blocked | Stays at the top. |
-| 2 | Completed, not viewed outside `LATER…`/`WAIT…` | Keeps Herdr's native done indicator near the top. |
-| 3 | Completed, viewed, no new run | Shows the extra badge above working agents. |
+| 2 | Completed, not viewed outside `LATER…`/`WAIT…` | Keeps Herdr's native done indicator near the top and groups it by Spaces order. |
+| 3 | Completed, viewed, no new run | Shows the extra badge above working agents and groups it by Spaces order. |
 | 4 | Working | Clears the previous completion marker. |
 | 5 | Active pi-subagents child | Shows `⏳ Subagent working` below directly working agents. |
 | 6 | Ordinary idle | Remains below active work. |
@@ -49,11 +49,13 @@ The badges read **`◉ Awaiting reply`** and **`⏳ Subagent working`**. Plugin 
 | 8 | Inactive in `WAIT…` | Stays below LATER sessions without a reply badge. |
 | 9 | Unknown outside parked workspaces | Remains last. |
 
+Inside each priority tier, sessions are grouped by the current top-left Spaces order: all matching sessions from the first Space appear before matching sessions from the second Space, and so on. The tier hierarchy itself stays unchanged—blocked remains above completed, completed above working, and so forth. Inside one Space, completed sessions keep unseen results ahead of reviewed `Awaiting reply` results, followed by the most recent state change. In LATER and WAIT, session/tab names remain the final alphabetical tie-breaker.
+
 Clicking a session or typing an unsent draft does **not** clear the completion marker. Starting a new parent work cycle does. A background child temporarily gets the subagent rank; any underlying completion marker returns when the child finishes.
 
 Workspace labels beginning with the case-sensitive prefix **`LATER`** or **`WAIT`** act as parking signals. Inactive sessions in either kind of workspace lose the `Awaiting reply` badge, including fresh completions. Ordinary idle sessions remain above parked sessions; LATER sessions remain above WAIT sessions. Blocked, directly working, and active-subagent sessions keep their activity ranks. Priority+ preserves pending history, so moving a completed session out of a parked workspace restores its rank and badge.
 
-While sorting is enabled, Priority+ also keeps the canonical workspace list in three groups: ordinary workspaces first in their existing order, followed by `LATER…` and `WAIT…`, each sorted case-insensitively by workspace name. In the Agents view, sessions inside each parked group are sorted by workspace name and then by session/tab name.
+Priority+ never rearranges the Spaces themselves. Their current visible order—including any drag-and-drop arrangement—is the source of truth for every Agents tier. `LATER…` and `WAIT…` labels change the inactive session rank, not the Space position; inside each parked Space, sessions additionally sort by session/tab name.
 
 > [!IMPORTANT]
 > “Awaiting reply” is a workflow reminder, not content analysis. It means **Herdr observed a completion and no new work cycle has started**. An error or abort that settles to idle can count as completion; an autonomous new run clears the marker too.
@@ -100,7 +102,7 @@ The first two rules show the two Priority+ badges; the third hides every other s
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** from 0.1.0, change the old `◉ Antwort offen` value to `◉ Awaiting reply`. From 0.1.1, add the `⏳ Subagent working` rule shown above. Version 0.1.3 starts an event watcher so subagent-only metadata changes apply immediately. Version 0.2.0 adds `LATER…` parking and canonical normal → LATER → WAIT workspace ordering. Version 0.2.1 separates the inactive Agents tiers into ordinary → LATER → WAIT. Version 0.3.0 alphabetizes parked workspaces and their sessions. Version 0.3.1 recovers lost event streams and detects active pi-subagents runs even when their Herdr summary metadata is missing. Version 0.3.2 keeps the subagent badge visible while the parent pane is blocked. Version 0.3.3 also places blocked parents with active children in the common subagent tier. Invoke `enable` once after updating a linked checkout; existing pending badges refresh without losing their completion state and the workspace groups reconcile. Do not run `cleanup` for these upgrades.
+> **Upgrading:** from 0.1.0, change the old `◉ Antwort offen` value to `◉ Awaiting reply`. From 0.1.1, add the `⏳ Subagent working` rule shown above. Version 0.1.3 starts an event watcher so subagent-only metadata changes apply immediately. Version 0.2.0 adds `LATER…` parking and canonical normal → LATER → WAIT workspace ordering. Version 0.2.1 separates the inactive Agents tiers into ordinary → LATER → WAIT. Version 0.3.0 alphabetizes parked workspaces and their sessions. Version 0.3.1 recovers lost event streams and detects active pi-subagents runs even when their Herdr summary metadata is missing. Version 0.3.2 keeps the subagent badge visible while the parent pane is blocked. Version 0.3.3 also places blocked parents with active children in the common subagent tier. Version 0.4.0 groups checkmarked and `Awaiting reply` sessions by the live Spaces order. Version 0.5.0 extends that Space-order grouping to every Priority+ tier, including working, idle, LATER, and WAIT. Version 0.5.1 bounds long parked-session sort keys to Herdr's metadata limit. Version 0.6.0 makes the visible drag-and-drop Space order fully user-controlled and removes Priority+'s former normal → LATER → WAIT reordering. Invoke `enable` once after updating a linked checkout; existing pending badges refresh without losing their completion state and all Space-position keys reconcile. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -130,7 +132,7 @@ herdr plugin action invoke local.priority-plus.enable
 herdr plugin action invoke local.priority-plus.disable
 ```
 
-**Disable turns off sorting enforcement only.** Completion tracking and badges remain active. Herdr returns to its configured Agents sort policy when this plugin owns the active view, and Priority+ stops correcting future workspace moves. Because workspace ordering is a canonical Herdr mutation, disabling does not restore the order that existed before Priority+ ran.
+**Disable turns off the custom Agents sort view only.** Completion tracking and badges remain active. Herdr returns to its configured Agents sort policy when this plugin owns the active view. Priority+ never changes the Space order, whether enabled or disabled.
 
 Priority+ is a custom view, not a new entry in Herdr's native sort selector. While active, its label appears in the Agents header and replaces the normal sort toggle. Use the plugin action or a shortcut to switch back.
 
@@ -167,15 +169,15 @@ herdr plugin unlink local.priority-plus
 
 Remove the badge row and optional shortcut from your config, then run `herdr server reload-config`.
 
-Cleanup also stops the event watcher and pauses tracking so queued hooks cannot recreate the metadata or restart the watcher. It does not reconstruct an earlier workspace order. To use the plugin again, invoke `enable`. Herdr retains plugin-owned state after unlinking. Simply disabling or unlinking the plugin does not perform this metadata cleanup.
+Cleanup also stops the event watcher and pauses tracking so queued hooks cannot recreate the metadata or restart the watcher. It leaves the user-controlled Space order untouched. To use the plugin again, invoke `enable`. Herdr retains plugin-owned state after unlinking. Simply disabling or unlinking the plugin does not perform this metadata cleanup.
 
 ## How it works
 
-Short-lived hooks reconcile Herdr's agent, workspace, and tab snapshots and track completion by terminal and agent/session identity. A `pp_rank` metadata token controls the priority section. Inactive parked sessions additionally receive case-folded `pp_workspace_sort` and, when the tab join is available, `pp_session_sort` tokens derived from the displayed workspace and session/tab names. Active tiers do not receive these alphabetical keys. Herdr's **client-local `seen`** then separates otherwise equal unread and reviewed results. An `idle` display label supplies the reply badge only after review.
+Short-lived hooks reconcile Herdr's agent, workspace, and tab snapshots and track completion by terminal and agent/session identity. A `pp_rank` metadata token controls the priority section. Every session receives a zero-padded `pp_workspace_sort` position derived from the authoritative visible workspace list, so each rank independently follows the Spaces order. Inactive parked sessions additionally receive a case-folded, Herdr-bounded `pp_session_sort` token when the tab join is available. Herdr's **client-local `seen`** then separates unread and reviewed results inside the same Space. An `idle` display label supplies the reply badge only after review.
 
 When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. If that best-effort metadata is missing, Priority+ falls back to live, same-user pi-subagents status artifacts and matches their parent session path to Herdr's agent-session identity. The original completion state remains intact underneath. Because Herdr deliberately excludes high-volume `pane.updated` events from manifest hooks, startup and low-volume hooks supervise one detached per-server socket watcher. It selects only subagent-summary edges, recovers `events_lost`, and reconciles when the active-session projection changes; ordinary pane updates are ignored.
 
-Priority+ joins each agent's `workspace_id` and `tab_id` with Herdr's live workspace and tab lists. Labels beginning with `LATER` or `WAIT` suppress the awaiting-reply presentation and assign distinct inactive ranks: ordinary idle → LATER → WAIT. Within the inactive LATER and WAIT sections, the view sorts case-insensitively by workspace label and then by session/tab label. Blocked, working, and active-subagent behavior remains visible at the normal activity ranks and keeps its existing secondary ordering. An active subagent keeps its badge across idle, done, working, and blocked parent states and always uses the common subagent rank. Only blocked sessions without active children retain the highest rank. When sorting is enabled, the authoritative workspace snapshot drives one idempotent `workspace.move_block` only when necessary, preserving normal order while alphabetizing the LATER and WAIT groups. Create, workspace/tab rename, manual-move, and reorder hooks converge without repeatedly moving an already-correct list.
+Priority+ joins each agent's `workspace_id` and `tab_id` with Herdr's live workspace and tab lists. Labels beginning with `LATER` or `WAIT` suppress the awaiting-reply presentation and assign distinct inactive ranks: ordinary idle → LATER → WAIT. Every rank uses the visible workspace position as its first secondary key; inactive LATER and WAIT sections then sort sessions inside the same workspace case-insensitively by session/tab label. Blocked, working, and active-subagent behavior remains visible at the normal activity ranks. An active subagent keeps its badge across idle, done, working, and blocked parent states and always uses the common subagent rank. Only blocked sessions without active children retain the highest rank. Create, rename, drag-and-drop, and reorder hooks only refresh metadata from the authoritative snapshot; they never call a workspace mutation API.
 
 There is **no transcript scanning**. The watcher primarily uses Herdr's event stream and performs a bounded two-second status-artifact heartbeat, with a full reconciliation at most every 30 seconds when nothing changes. It exits when the server socket closes; `cleanup` stops it explicitly. Per-socket locks and atomic private files serialize updates. Requests have bounded timeouts and verify the server's process identity. Status artifacts must be regular same-user files, stay below 1 MiB, name a live parent PID, and report a queued/running state. The plugin never submits prompts, changes focus, renames sessions, or fabricates native agent states. Stored metadata may include session IDs or paths.
 
@@ -184,8 +186,8 @@ There is **no transcript scanning**. The watcher primarily uses Herdr's event st
 - **Restarts reset completion tracking**, but preserve your sorting preference. Missed historical runs cannot be reconstructed; hook updates can briefly lag.
 - **Subagent detection prefers pi-subagents metadata.** The standard `⏳ N subagent(s)` summary token is primary; live same-user status artifacts are the fallback when the root Pi session fails to publish or refresh it.
 - **Parking matching is case-sensitive and prefix-based.** `LATER`, `LATER/MP`, `WAIT`, and `WAITING` match; lowercase variants do not.
-- **Workspace grouping changes canonical order.** While enabled, Priority+ corrects manual moves back to normal → alphabetic LATER → alphabetic WAIT. Disable or cleanup stops future enforcement but does not restore a previous order; linked-worktree workspaces are sorted by their own displayed labels like every other workspace.
-- **Alphabetical sorting is case-insensitive, not locale-aware.** It uses Unicode case folding on the displayed workspace and session/tab labels.
+- **Space order is user-controlled.** Priority+ mirrors the current visible order inside every Agents tier and never moves Spaces itself. Drag-and-drop changes therefore become the new ordering source immediately, including for LATER, WAIT, and linked-worktree Spaces.
+- **Parked session-name sorting is case-insensitive, not locale-aware.** It uses Unicode case folding on displayed session/tab labels; Space ordering itself is never alphabetical unless the user arranged it that way.
 - **Single-server support.** Combined multi-machine views are unsupported. Simultaneous clients have not been end-to-end validated.
 - **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`.
 - **Views are shared:** enable/startup can replace another plugin's view. Ordinary hooks never reclaim it; clearing affects only Priority+'s view.
@@ -200,7 +202,7 @@ There is **no transcript scanning**. The watcher primarily uses Herdr's event st
 | Native icon becomes a circle | Expected: the badge is an extra row, not an icon replacement. |
 | Badges remain after disabling sorting | Expected; `cleanup` removes them and pauses tracking. |
 | `Awaiting reply` remains in a parked workspace | Confirm the workspace label begins with uppercase `LATER` or `WAIT`, then invoke `enable` and inspect plugin logs. |
-| Workspace groups are not corrected | Confirm Priority+ sorting is enabled; disabled/cleaned hooks intentionally do not reorder workspaces. |
+| Agents rows do not follow a new Space order | Invoke `enable`, then inspect plugin logs for successful `workspace.moved`/`workspace.reordered` hooks. Priority+ should never move the Spaces back. |
 
 ```sh
 herdr plugin list --plugin local.priority-plus --json
@@ -241,4 +243,4 @@ uv run --with pyte python tests/tui_smoke.py \
 
 Tests use temporary HOME/XDG directories and sockets, discard inherited Herdr connection variables, and stop only their own servers—**never your live sessions**. Evidence under `test-artifacts/` is Git-ignored.
 
-Coverage includes transitions, LATER/WAIT parking and rename restoration, alphabetic parked workspace/session ordering, metadata-only and status-artifact subagent detection, watcher filtering/ticks/event-loss recovery, identity changes, moves, restarts, concurrent persistence, foreign metadata/views, and cleanup. The real TUI test checks **unread → clicked/read → draft typed → new work**, LATER/WAIT hierarchy and alphabetization, canonical workspace order, the subagent row, and both sorting toggles.
+Coverage includes transitions, user-controlled drag-and-drop Space ordering across every rank, LATER/WAIT parking and rename restoration, parked session ordering, metadata-only and status-artifact subagent detection, watcher filtering/ticks/event-loss recovery, identity changes, moves, restarts, concurrent persistence, foreign metadata/views, and cleanup. The real TUI test checks **unread → clicked/read → draft typed → new work**, cross-Space ordering, persisted Space moves, LATER/WAIT hierarchy, the subagent row, and both sorting toggles.

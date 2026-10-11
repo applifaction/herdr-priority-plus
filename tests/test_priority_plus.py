@@ -140,42 +140,6 @@ class LifecycleTests(unittest.TestCase):
         waiting = pp.observe(agent("idle"), parking="wait")
         self.assertEqual([pp.rank(normal), pp.rank(later), pp.rank(waiting)], ["3", "2", "1"])
 
-    def test_workspace_order_preserves_normal_and_alphabetizes_later_wait(self):
-        workspaces = [
-            {"workspace_id": "wait-z", "label": "WAIT/Zebra"},
-            {"workspace_id": "normal-1", "label": "one"},
-            {"workspace_id": "later-z", "label": "LATER/Zebra"},
-            {"workspace_id": "normal-2", "label": "two"},
-            {"workspace_id": "wait-a", "label": "WAIT/alpha"},
-            {"workspace_id": "later-a", "label": "LATER/alpha"},
-        ]
-        client = FakeClient([])
-        client.workspaces = copy.deepcopy(workspaces)
-        self.assertTrue(pp.reconcile_workspace_order(client, workspaces))
-        self.assertEqual([workspace["workspace_id"] for workspace in client.workspaces], [
-            "normal-1", "normal-2", "later-a", "later-z", "wait-a", "wait-z",
-        ])
-        self.assertEqual([call for call in client.calls if call[0] == "workspace.move_block"], [
-            ("workspace.move_block", {
-                "workspace_ids": ["later-a", "later-z", "wait-a", "wait-z"],
-            }),
-        ])
-        client.calls.clear()
-        self.assertFalse(pp.reconcile_workspace_order(client, client.workspaces))
-        self.assertEqual(client.calls, [])
-
-    def test_workspace_order_tolerates_disappearing_workspace_only(self):
-        client = FakeClient([])
-        workspaces = [
-            {"workspace_id": "wait", "label": "WAIT/one"},
-            {"workspace_id": "normal", "label": "one"},
-        ]
-        client.fail = "workspace_not_found"
-        self.assertFalse(pp.reconcile_workspace_order(client, workspaces))
-        client.fail = "workspace_move_block_failed"
-        with self.assertRaises(pp.ApiError):
-            pp.reconcile_workspace_order(client, workspaces)
-
     def test_subagent_summary_detection_and_pending_preservation(self):
         for summary in ("⏳ 1 subagent", "⏳ 2 subagents (worker, reviewer)"):
             with self.subTest(summary=summary):
@@ -220,6 +184,12 @@ class LifecycleTests(unittest.TestCase):
         session = {"source": "herdr:pi", "agent": "pi", "kind": "id", "value": "old"}
         first = pp.observe(agent("done", 10, agent_session=session))
         self.assertFalse(pp.observe(agent("idle", 10), first)["pending"])
+
+    def test_workspace_and_metadata_sort_keys_are_lexically_safe(self):
+        self.assertEqual(pp.workspace_order_key(0), "00000000000000000000")
+        self.assertLess(pp.workspace_order_key(2), pp.workspace_order_key(10))
+        self.assertEqual(pp.metadata_sort_key("Ä" * 100), ("ä" * 80))
+        self.assertEqual(len(pp.metadata_sort_key("A" * 100)), pp.METADATA_TOKEN_CHAR_LIMIT)
 
     def test_ranking_expression(self):
         self.assertNotIn("filter", pp.VIEW)
@@ -622,7 +592,76 @@ class ReconciliationTests(unittest.TestCase):
                 self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
                 self.assertEqual(self.client.agents[0]["state_labels"], {"idle": pp.LABEL})
 
-    def test_parked_agents_get_alphabetical_workspace_and_session_tokens(self):
+    def test_all_ranks_follow_workspace_order(self):
+        self.client.workspaces = [
+            {"workspace_id": "z-first", "label": "Zulu first"},
+            {"workspace_id": "a-second", "label": "Alpha second"},
+        ]
+        self.client.agents = [
+            agent("done", terminal_id="first-unread", pane_id="z-first:p1",
+                  workspace_id="z-first", tab_id="z-first:t1"),
+            agent("idle", terminal_id="first-reviewed", pane_id="z-first:p2",
+                  workspace_id="z-first", tab_id="z-first:t2"),
+            agent("done", terminal_id="second-unread", pane_id="a-second:p1",
+                  workspace_id="a-second", tab_id="a-second:t1",
+                  tokens={"pp_workspace_sort": "stale", "pp_session_sort": "stale"}),
+            agent("working", terminal_id="second-working", pane_id="a-second:p2",
+                  workspace_id="a-second", tab_id="a-second:t2",
+                  tokens={"pp_workspace_sort": "stale", "pp_session_sort": "stale"}),
+            agent("idle", terminal_id="second-idle", pane_id="a-second:p3",
+                  workspace_id="a-second", tab_id="a-second:t3",
+                  tokens={"pp_workspace_sort": "stale", "pp_session_sort": "stale"}),
+            agent("blocked", terminal_id="second-blocked", pane_id="a-second:p4",
+                  workspace_id="a-second", tab_id="a-second:t4"),
+            agent("idle", terminal_id="second-subagent", pane_id="a-second:p5",
+                  workspace_id="a-second", tab_id="a-second:t5",
+                  tokens={"summary": "⏳ 1 subagent"}),
+            agent("unknown", terminal_id="second-unknown", pane_id="a-second:p6",
+                  workspace_id="a-second", tab_id="a-second:t6"),
+        ]
+        self.state["agents"]["first-reviewed"] = pp.observe(agent(
+            "done", terminal_id="first-reviewed", pane_id="z-first:p2",
+            workspace_id="z-first", tab_id="z-first:t2"))
+
+        self.sync()
+        by_terminal = {entry["terminal_id"]: entry for entry in self.client.agents}
+        first_key = pp.workspace_order_key(0)
+        second_key = pp.workspace_order_key(1)
+        self.assertEqual(by_terminal["first-unread"]["tokens"], {
+            pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: first_key,
+        })
+        self.assertEqual(by_terminal["first-reviewed"]["tokens"], {
+            pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: first_key,
+        })
+        self.assertEqual(by_terminal["second-unread"]["tokens"], {
+            pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: second_key,
+        })
+        self.assertEqual(by_terminal["second-working"]["tokens"], {
+            pp.TOKEN: pp.RANK_WORKING, pp.WORKSPACE_TOKEN: second_key,
+        })
+        self.assertEqual(by_terminal["second-idle"]["tokens"], {
+            pp.TOKEN: pp.RANK_IDLE, pp.WORKSPACE_TOKEN: second_key,
+        })
+        self.assertEqual(by_terminal["second-blocked"]["tokens"], {
+            pp.TOKEN: pp.RANK_BLOCKED, pp.WORKSPACE_TOKEN: second_key,
+        })
+        self.assertEqual(by_terminal["second-subagent"]["tokens"], {
+            "summary": "⏳ 1 subagent", pp.TOKEN: pp.RANK_SUBAGENT,
+            pp.WORKSPACE_TOKEN: second_key,
+        })
+        self.assertEqual(by_terminal["second-unknown"]["tokens"], {
+            pp.TOKEN: pp.RANK_UNKNOWN, pp.WORKSPACE_TOKEN: second_key,
+        })
+
+        self.client.workspaces.reverse()
+        self.sync()
+        self.assertEqual(by_terminal["first-unread"]["tokens"][pp.WORKSPACE_TOKEN], second_key)
+        self.assertEqual(by_terminal["first-reviewed"]["tokens"][pp.WORKSPACE_TOKEN], second_key)
+        for terminal in ("second-unread", "second-working", "second-idle",
+                         "second-blocked", "second-subagent", "second-unknown"):
+            self.assertEqual(by_terminal[terminal]["tokens"][pp.WORKSPACE_TOKEN], first_key)
+
+    def test_parked_agents_get_visible_workspace_and_alphabetical_session_tokens(self):
         self.client.agents = [
             agent("idle", terminal_id="later-z", pane_id="later-z:p1",
                   workspace_id="later-z", tab_id="later-z:t1"),
@@ -662,49 +701,65 @@ class ReconciliationTests(unittest.TestCase):
         ]
         self.sync()
         by_terminal = {entry["terminal_id"]: entry for entry in self.client.agents}
+        later_z_key = pp.workspace_order_key(0)
+        normal_key = pp.workspace_order_key(1)
+        later_a_key = pp.workspace_order_key(2)
         self.assertEqual(by_terminal["later-z"]["tokens"], {
-            pp.TOKEN: "2", "pp_workspace_sort": "later/zebra", "pp_session_sort": "middle",
+            pp.TOKEN: "2", "pp_workspace_sort": later_z_key, "pp_session_sort": "middle",
         })
         self.assertEqual(by_terminal["later-a-beta"]["tokens"], {
-            pp.TOKEN: "2", "pp_workspace_sort": "later/alpha", "pp_session_sort": "zulu session",
+            pp.TOKEN: "2", "pp_workspace_sort": later_a_key, "pp_session_sort": "zulu session",
         })
         self.assertEqual(by_terminal["later-a-alpha"]["tokens"], {
-            pp.TOKEN: "2", "pp_workspace_sort": "later/alpha", "pp_session_sort": "alpha session",
+            pp.TOKEN: "2", "pp_workspace_sort": later_a_key, "pp_session_sort": "alpha session",
         })
-        self.assertEqual(by_terminal["normal"]["tokens"], {pp.TOKEN: "3"})
-        self.assertEqual(by_terminal["later-working"]["tokens"], {pp.TOKEN: "5"})
-        self.assertEqual(by_terminal["later-blocked"]["tokens"], {pp.TOKEN: "7"})
+        self.assertEqual(by_terminal["normal"]["tokens"], {
+            pp.TOKEN: "3", pp.WORKSPACE_TOKEN: normal_key,
+        })
+        self.assertEqual(by_terminal["later-working"]["tokens"], {
+            pp.TOKEN: "5", pp.WORKSPACE_TOKEN: later_a_key,
+        })
+        self.assertEqual(by_terminal["later-blocked"]["tokens"], {
+            pp.TOKEN: "7", pp.WORKSPACE_TOKEN: later_a_key,
+        })
         self.assertEqual(by_terminal["later-subagent"]["tokens"], {
-            "summary": "⏳ 1 subagent", pp.TOKEN: "4",
+            "summary": "⏳ 1 subagent", pp.TOKEN: "4", pp.WORKSPACE_TOKEN: later_a_key,
         })
         self.assertEqual(by_terminal["later-missing-tab"]["tokens"], {
-            pp.TOKEN: "2", "pp_workspace_sort": "later/alpha",
+            pp.TOKEN: "2", "pp_workspace_sort": later_a_key,
         })
 
-    def test_workspace_order_reconciles_once_and_skips_while_disabled(self):
+    def test_user_workspace_order_is_preserved_while_enabled(self):
         self.client.workspaces = [
             {"workspace_id": "wait", "label": "WAIT/one"},
             {"workspace_id": "normal", "label": "one"},
             {"workspace_id": "later", "label": "LATER/one"},
         ]
+        self.client.agents = [
+            agent("idle", terminal_id="wait", pane_id="wait:p1", workspace_id="wait"),
+            agent("idle", terminal_id="normal", pane_id="normal:p1", workspace_id="normal"),
+            agent("idle", terminal_id="later", pane_id="later:p1", workspace_id="later"),
+        ]
+        original = copy.deepcopy(self.client.workspaces)
         self.sync()
-        moves = [call for call in self.client.calls if call[0] == "workspace.move_block"]
-        self.assertEqual(moves, [("workspace.move_block", {
-            "workspace_ids": ["later", "wait"],
-        })])
-        self.client.calls.clear()
-        self.sync()
-        self.assertFalse(any(method == "workspace.move_block" for method, _ in self.client.calls))
+        self.assertEqual(self.client.workspaces, original)
+        self.assertFalse(any(method == "workspace.move_block"
+                             for method, _ in self.client.calls))
+        by_terminal = {entry["terminal_id"]: entry for entry in self.client.agents}
+        for position, terminal in enumerate(("wait", "normal", "later")):
+            self.assertEqual(by_terminal[terminal]["tokens"][pp.WORKSPACE_TOKEN],
+                             pp.workspace_order_key(position))
 
-        self.state["enabled"] = False
-        self.client.workspaces = [
-            {"workspace_id": "wait", "label": "WAIT/one"},
-            {"workspace_id": "normal", "label": "one"},
-            {"workspace_id": "later", "label": "LATER/one"},
-        ]
+        self.client.workspaces = [original[2], original[0], original[1]]
         self.client.calls.clear()
         self.sync()
-        self.assertFalse(any(method == "workspace.move_block" for method, _ in self.client.calls))
+        self.assertEqual([workspace["workspace_id"] for workspace in self.client.workspaces],
+                         ["later", "wait", "normal"])
+        self.assertFalse(any(method == "workspace.move_block"
+                             for method, _ in self.client.calls))
+        for position, terminal in enumerate(("later", "wait", "normal")):
+            self.assertEqual(by_terminal[terminal]["tokens"][pp.WORKSPACE_TOKEN],
+                             pp.workspace_order_key(position))
 
     def test_upgrade_refreshes_applied_label_without_losing_completion(self):
         self.sync()
@@ -853,7 +908,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.3.3")
+        self.assertEqual(manifest["version"], "0.6.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

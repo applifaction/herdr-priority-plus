@@ -108,15 +108,31 @@ class RealHerdrTests(unittest.TestCase):
                         return wait(lambda: get(pane).get("tokens", {}).get(pp.TOKEN) == rank,
                                     f"{pane} rank={rank}")
 
-                    def expect_sort_tokens(pane, workspace_label, session_label):
+                    def workspace_sort_key(pane):
+                        workspace_id = get(pane)["workspace_id"]
+                        workspaces = call("workspace.list")["workspaces"]
+                        position = next(
+                            index for index, workspace in enumerate(workspaces)
+                            if workspace["workspace_id"] == workspace_id
+                        )
+                        return pp.workspace_order_key(position)
+
+                    def expect_workspace_token(pane):
+                        expected = workspace_sort_key(pane)
+                        return wait(
+                            lambda: get(pane).get("tokens", {}).get(pp.WORKSPACE_TOKEN) == expected,
+                            f"{pane} workspace token={expected}",
+                        )
+
+                    def expect_sort_tokens(pane, session_label):
                         expected = {
-                            pp.WORKSPACE_TOKEN: workspace_label.casefold(),
+                            pp.WORKSPACE_TOKEN: workspace_sort_key(pane),
                             pp.SESSION_TOKEN: session_label.casefold(),
                         }
                         return wait(
                             lambda: all(get(pane).get("tokens", {}).get(key) == value
                                         for key, value in expected.items()),
-                            f"{pane} alphabetical sort tokens",
+                            f"{pane} workspace and alphabetical session sort tokens",
                         )
 
                     wait(lambda: any(entry.get("event") == "startup" and entry["status"] == "succeeded"
@@ -140,26 +156,32 @@ class RealHerdrTests(unittest.TestCase):
                     )["root_pane"]["pane_id"]
                     call("tab.rename", tab_id=get(waiting_alpha)["tab_id"], label="Wait session")
                     after_parked = fixture("normal-after-parked")
-                    parked_order = ["LATER/alpha", "LATER/fixture", "WAIT/alpha", "WAIT/fixture"]
-                    wait(lambda: workspace_labels()[-4:] == parked_order
-                         and workspace_labels().index("normal-after-parked")
-                         < workspace_labels().index("LATER/alpha"),
-                         "normal -> alphabetic LATER -> alphabetic WAIT workspace order")
-                    evidence.append("workspace create hooks alphabetize LATER and WAIT groups")
+                    expected_workspace_order = [
+                        "focused", "background", "blocked", "plain-idle", "working", "subagent",
+                        "WAIT/fixture", "LATER/fixture", "WAIT/alpha", "LATER/alpha",
+                        "normal-after-parked",
+                    ]
+                    wait(lambda: workspace_labels() == expected_workspace_order,
+                         "workspace creation order remains user-controlled")
+                    evidence.append("workspace create hooks preserve the visible user order")
                     waiting_workspace = get(waiting)["workspace_id"]
                     call("workspace.move", workspace_id=waiting_workspace, insert_index=0)
-                    wait(lambda: workspace_labels()[-4:] == parked_order,
-                         "enabled workspace move hook restores parked groups")
-                    evidence.append("workspace move and reordered hooks converge while enabled")
+                    expected_workspace_order = [
+                        "WAIT/fixture",
+                        *[label for label in expected_workspace_order if label != "WAIT/fixture"],
+                    ]
+                    wait(lambda: workspace_labels() == expected_workspace_order,
+                         "enabled workspace drag order persists")
+                    evidence.append("workspace move and reordered hooks preserve drag-and-drop order")
                     report(later_alpha, "idle")
                     report(later_alpha_second, "idle")
                     report(waiting_alpha, "idle")
-                    expect_sort_tokens(later_alpha, "LATER/alpha", "Zulu session")
-                    expect_sort_tokens(later_alpha_second, "LATER/alpha", "alpha session")
-                    expect_sort_tokens(waiting_alpha, "WAIT/alpha", "Wait session")
+                    expect_sort_tokens(later_alpha, "Zulu session")
+                    expect_sort_tokens(later_alpha_second, "alpha session")
+                    expect_sort_tokens(waiting_alpha, "Wait session")
                     call("tab.rename", tab_id=get(later_alpha)["tab_id"], label="Aardvark session")
-                    expect_sort_tokens(later_alpha, "LATER/alpha", "Aardvark session")
-                    evidence.append("parked agent tokens sort by workspace then live tab/session label")
+                    expect_sort_tokens(later_alpha, "Aardvark session")
+                    evidence.append("parked agent tokens follow Spaces order then live tab/session label")
                     report(plain, "idle")
                     expect_rank(plain, "3")
                     self.assertNotEqual(get(plain).get("state_labels", {}).get("idle"), pp.LABEL)
@@ -180,6 +202,23 @@ class RealHerdrTests(unittest.TestCase):
                         self.assertEqual(get(pane)["title"], "foreign title")
                         self.assertEqual(get(pane)["state_labels"]["working"], "foreign work")
                     self.assertEqual(get(background)["agent_status"], "done")
+                    for pane in (focused, background, working, blocked, plain,
+                                 later_alpha, later_alpha_second, waiting_alpha):
+                        expect_workspace_token(pane)
+                    background_workspace = get(background)["workspace_id"]
+                    call("workspace.move", workspace_id=background_workspace, insert_index=0)
+                    expected_workspace_order = [
+                        "background",
+                        *[label for label in expected_workspace_order if label != "background"],
+                    ]
+                    wait(lambda: workspace_labels() == expected_workspace_order,
+                         "ordinary workspace move remains authoritative")
+                    expect_workspace_token(background)
+                    expect_workspace_token(focused)
+                    expect_workspace_token(working)
+                    evidence.append(
+                        "all Priority+ ranks follow live Spaces order within their own tier"
+                    )
                     evidence.append("background done and focused completion both rank 6; blocked=7, working=5, plain idle=3")
                     report(subagent, "working")
                     expect_rank(subagent, "5")
@@ -242,9 +281,9 @@ class RealHerdrTests(unittest.TestCase):
                     expect_rank(later, "2")
                     wait(lambda: get(later).get("state_labels", {}).get("idle") != pp.LABEL,
                          "returning to LATER clears awaiting label")
-                    wait(lambda: workspace_labels()[-4:] == parked_order,
-                         "renamed LATER returns to alphabetic parked order")
-                    evidence.append("LATER matches WAIT agent parking and restores pending presentation after rename")
+                    wait(lambda: workspace_labels() == expected_workspace_order,
+                         "renamed LATER keeps its user-selected position")
+                    evidence.append("LATER matches WAIT agent parking without changing Space position")
                     call("pane.focus", pane_id=background)
                     wait(lambda: get(background)["agent_status"] == "idle", "focus native review")
                     call("pane.send_text", pane_id=background, text="draft-not-submitted")
@@ -269,19 +308,24 @@ class RealHerdrTests(unittest.TestCase):
                     view = call("agent.view.clear", source=pp.SOURCE)
                     self.assertTrue(view["active"])
                     self.assertEqual(view["source"], "test:foreign")
+                    order_before_disabled_move = workspace_labels()
                     call("workspace.move", workspace_id=waiting_workspace, insert_index=0)
-                    wait(settled, "disabled workspace move hook")
-                    self.assertEqual(workspace_labels()[0], "WAIT/fixture")
+                    expected_workspace_order = [
+                        "WAIT/fixture",
+                        *[label for label in order_before_disabled_move if label != "WAIT/fixture"],
+                    ]
+                    wait(lambda: workspace_labels() == expected_workspace_order,
+                         "disabled workspace move persists")
                     action("enable")
-                    wait(lambda: workspace_labels()[-4:] == parked_order,
-                         "enable restores parked workspace groups")
+                    wait(lambda: workspace_labels() == expected_workspace_order,
+                         "enable preserves user workspace order")
                     view = call("agent.view.clear", source="test:not-owner")
                     self.assertEqual(view["source"], pp.SOURCE)
                     self.assertEqual(view["label"], "Priority+")
                     action("toggle")
                     self.assertFalse(call("agent.view.clear", source="test:not-owner")["active"])
                     action("toggle")
-                    evidence.append("disable stops workspace enforcement; enable restores it and remains source-scoped")
+                    evidence.append("disable and enable both preserve user workspace order and remain source-scoped")
                     report(background, "working")
                     expect_rank(background, "5")
                     wait(lambda: get(background).get("state_labels", {}).get("idle") == "foreign idle",
