@@ -86,6 +86,9 @@ class LifecycleTests(unittest.TestCase):
         record = pp.observe(agent("idle", tokens={"summary": "⏳ 2 subagents (worker, reviewer)"}))
         self.assertTrue(record["subagent"])
         self.assertEqual(pp.rank(record), "4")
+        blocked_with_child = pp.observe(agent(
+            "blocked", tokens={"summary": "⏳ 1 subagent (worker)"}))
+        self.assertEqual(pp.rank(blocked_with_child), pp.RANK_SUBAGENT)
 
     def test_transitions_and_review(self):
         record = None
@@ -850,7 +853,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.3.2")
+        self.assertEqual(manifest["version"], "0.3.3")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

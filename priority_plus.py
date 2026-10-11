@@ -35,7 +35,7 @@ RANK_UNKNOWN = "0"
 LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.3.2"
+WATCHER_VERSION = "0.3.3"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -444,10 +444,10 @@ def observe(agent, previous=None, parking=None, active_sessions=None):
 
 
 def rank(record):
-    if record["status"] == "blocked":
-        return RANK_BLOCKED
     if record.get("subagent"):
         return RANK_SUBAGENT
+    if record["status"] == "blocked":
+        return RANK_BLOCKED
     if record["status"] == "working":
         return RANK_WORKING
     if record.get("parking") == "later":
