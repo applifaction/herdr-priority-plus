@@ -71,10 +71,11 @@ def increment(directory, sock):
 
 
 class LifecycleTests(unittest.TestCase):
-    def test_only_subagent_badge_is_active(self):
+    def test_only_explicit_activity_badges_are_active(self):
         self.assertFalse(hasattr(pp, "LABEL"))
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
+        self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
 
     def test_bootstrap_and_all_ranks(self):
         expected = {"blocked": "7", "done": "6", "working": "5", "idle": "3", "unknown": "0"}
@@ -90,6 +91,10 @@ class LifecycleTests(unittest.TestCase):
         blocked_with_child = pp.observe(agent(
             "blocked", tokens={"summary": "⏳ 1 subagent (worker)"}))
         self.assertEqual(pp.rank(blocked_with_child), pp.RANK_SUBAGENT)
+        parallel_wait = pp.observe(agent(
+            "idle", tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release"}))
+        self.assertEqual(parallel_wait["parallel_wait"], "history & release")
+        self.assertEqual(pp.rank(parallel_wait), pp.RANK_WORKING)
 
     def test_transitions_and_review(self):
         record = None
@@ -277,6 +282,29 @@ class WatcherTests(unittest.TestCase):
             tokens={pp.TOKEN: pp.RANK_PENDING},
         )
         self.assertFalse(pp.needs_reconcile_event(cleaned))
+
+    def test_parallel_wait_metadata_edges_require_reconciliation(self):
+        wait_label = pp.parallel_wait_label("history & release")
+        active = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release", pp.TOKEN: "3"},
+        )
+        self.assertTrue(pp.needs_reconcile_event(active))
+
+        converged = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release",
+                    pp.TOKEN: pp.RANK_WORKING},
+            state_labels={state: wait_label for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(converged))
+
+        removed = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.TOKEN: pp.RANK_WORKING},
+            state_labels={"idle": wait_label},
+        )
+        self.assertTrue(pp.needs_reconcile_event(removed))
 
     def test_only_subagent_metadata_edges_require_reconciliation(self):
         active = self.pane_event(
@@ -574,6 +602,31 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
         self.assertNotIn("state_labels", self.client.agents[0])
+
+    def test_parallel_wait_uses_working_rank_and_dynamic_label_then_cleans_up(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.sync()
+        wait_label = pp.parallel_wait_label("history & release")
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertEqual(current["tokens"][pp.PARALLEL_WAIT_TARGET_TOKEN], "history & release")
+        self.assertEqual(current["state_labels"], {
+            state: wait_label for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(self.state["agents"]["term-1"]["parallel_wait"], "history & release")
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(self.writes(), [])
+
+        current["tokens"].pop(pp.PARALLEL_WAIT_TARGET_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_IDLE)
+        self.assertNotIn("state_labels", current)
 
     def test_upgrade_removes_legacy_pending_presentation_and_token(self):
         completed = pp.observe(agent("done", 2))
@@ -960,7 +1013,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.9.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

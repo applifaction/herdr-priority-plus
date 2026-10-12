@@ -24,6 +24,7 @@ TOKEN = "pp_rank"
 WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
 LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
+PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
@@ -35,8 +36,9 @@ RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
+PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.8.0"
+WATCHER_VERSION = "0.9.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -190,6 +192,9 @@ def load_state(path, boot):
                     or type(record.get("pending")) is not bool
                     or not isinstance(record.get("status"), str)
                     or ("subagent" in record and type(record["subagent"]) is not bool)
+                    or ("parallel_wait" in record
+                        and record["parallel_wait"] is not None
+                        and not isinstance(record["parallel_wait"], str))
                     or ("waiting" in record and type(record["waiting"]) is not bool)
                     or record.get("parking") not in (None, "later", "wait")):
                 raise RuntimeError("Invalid Priority+ agent record")
@@ -315,6 +320,18 @@ def has_active_subagents(agent, active_sessions=None):
     return isinstance(session, str) and session in (active_sessions or ())
 
 
+def parallel_wait_target(agent):
+    target = (agent.get("tokens") or {}).get(PARALLEL_WAIT_TARGET_TOKEN)
+    if not isinstance(target, str):
+        return None
+    target = " ".join(target.split())
+    return target[:METADATA_TOKEN_CHAR_LIMIT] or None
+
+
+def parallel_wait_label(target):
+    return (PARALLEL_WAIT_LABEL_PREFIX + target)[:METADATA_TOKEN_CHAR_LIMIT]
+
+
 def needs_reconcile_event(message):
     """Select metadata-only presentation edges omitted from plugin hooks."""
     if not isinstance(message, dict):
@@ -335,6 +352,14 @@ def needs_reconcile_event(message):
     if not isinstance(labels, dict):
         labels = {}
     if labels.get("idle") == LEGACY_PENDING_LABEL:
+        return True
+    wait_target = parallel_wait_target(pane)
+    if wait_target:
+        wait_label = parallel_wait_label(wait_target)
+        return (tokens.get(TOKEN) != RANK_WORKING
+                or any(labels.get(status) != wait_label for status in SUBAGENT_STATES))
+    if any(isinstance(label, str) and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
+           for label in labels.values()):
         return True
     if has_active_subagents(pane):
         return (tokens.get(TOKEN) != RANK_SUBAGENT
@@ -430,11 +455,15 @@ def observe(agent, previous=None, parking=None, active_sessions=None):
     # Working/blocked/unknown are not a completed run. Keep the underlying
     # pending flag while a child runs so its completion priority can return afterwards.
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
-            "subagent": has_active_subagents(agent, active_sessions), "waiting": parking is not None,
+            "subagent": has_active_subagents(agent, active_sessions),
+            "parallel_wait": parallel_wait_target(agent), "waiting": parking is not None,
             "parking": parking, "applied": previous.get("applied") if previous else None}
 
 
 def rank(record):
+    # Waiting on conflicting peer work stays in the active working tier.
+    if record.get("parallel_wait"):
+        return RANK_WORKING
     if record.get("subagent"):
         return RANK_SUBAGENT
     if record["status"] == "blocked":
@@ -527,8 +556,14 @@ def reconcile(client, state, path):
         }
         if token_updates:
             fields["tokens"] = token_updates
-        # Cache the emitted text so subagent labels are updated idempotently.
-        if record["subagent"]:
+        # Cache emitted text so dynamic waiting/subagent labels stay idempotent.
+        if record["parallel_wait"]:
+            label_state = parallel_wait_label(record["parallel_wait"])
+            labels = agent.get("state_labels") or {}
+            if (record["applied"] != label_state
+                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
+                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
+        elif record["subagent"]:
             label_state = SUBAGENT_LABEL
             labels = agent.get("state_labels") or {}
             # pi-subagents refreshes its dynamic count label periodically. The
@@ -539,7 +574,10 @@ def reconcile(client, state, path):
         else:
             label_state = False
             labels = agent.get("state_labels") or {}
-            stale_badge = labels.get("idle") == LEGACY_PENDING_LABEL
+            stale_badge = (labels.get("idle") == LEGACY_PENDING_LABEL
+                           or any(isinstance(label, str)
+                                  and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
+                                  for label in labels.values()))
             if record["applied"] != label_state or stale_badge:
                 fields["clear_state_labels"] = True
         if fields:
