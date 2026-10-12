@@ -32,8 +32,8 @@ class RealHerdrTests(unittest.TestCase):
             config.write_text('[update]\nversion_check = false\nmanifest_check = false\n'
                               '[ui.sidebar.agents]\nrows = [\n'
                               '  ["state_icon", "agent", "workspace"],\n'
-                              '  [{ token = "state_text", rules = [{ equals = "⏳ Subagent working" }, '
-                              '{ contains = "", hide = true }] }],\n]\n')
+                              '  [{ token = "state_text", rules = [{ equals = "⚠ Interview Pending" }, '
+                              '{ equals = "⏳ Subagent working" }, { contains = "", hide = true }] }],\n]\n')
             env.update(HERDR_SOCKET_PATH=str(base / "api.sock"),
                        HERDR_CLIENT_SOCKET_PATH=str(base / "client.sock"),
                        HERDR_CONFIG_PATH=str(config), SHELL="/bin/sh", TERM="xterm-256color")

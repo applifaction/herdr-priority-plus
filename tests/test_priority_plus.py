@@ -76,6 +76,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
+        self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
     def test_bootstrap_and_all_ranks(self):
         expected = {"blocked": "7", "done": "6", "working": "5", "idle": "3", "unknown": "0"}
@@ -95,6 +96,13 @@ class LifecycleTests(unittest.TestCase):
             "idle", tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release"}))
         self.assertEqual(parallel_wait["parallel_wait"], "history & release")
         self.assertEqual(pp.rank(parallel_wait), pp.RANK_WORKING)
+        interview_agent = agent(
+            "working", agent_session={"source": "herdr:pi", "agent": "pi",
+                                        "kind": "path", "value": "/sessions/interview.jsonl"})
+        interview = pp.observe(
+            interview_agent, interview_sessions={"/sessions/interview.jsonl"})
+        self.assertTrue(interview["interview"])
+        self.assertEqual(pp.rank(interview), pp.RANK_INTERVIEW)
 
     def test_transitions_and_review(self):
         record = None
@@ -206,8 +214,9 @@ class LifecycleTests(unittest.TestCase):
             {"field": "seen", "order": "asc"},
             {"field": "state_change_seq", "order": "desc"}])
         rows = [("blocked", False), ("done", False), ("idle", True), ("working", True)]
-        facts = [(pp.rank(pp.observe(agent(status), pp.observe(agent("done")))), seen)
-                 for status, seen in rows]
+        facts = [(pp.RANK_INTERVIEW, False)]
+        facts.extend((pp.rank(pp.observe(agent(status), pp.observe(agent("done")))), seen)
+                     for status, seen in rows)
         facts.append((pp.rank(pp.observe(agent("idle", tokens={"summary": "⏳ 1 subagent"}))), True))
         self.assertEqual(sorted(facts, key=lambda r: (-int(r[0]), r[1])), facts)
 
@@ -265,6 +274,100 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(len(list(path.parent.iterdir())), 1)
 
 
+class InterviewDetectionTests(unittest.TestCase):
+    def assistant_call(self, entry_id, parent_id, call_id, tool="interview"):
+        return {
+            "type": "message", "id": entry_id, "parentId": parent_id,
+            "message": {"role": "assistant", "content": [{
+                "type": "toolCall", "id": call_id, "name": tool, "arguments": {},
+            }]},
+        }
+
+    def tool_result(self, entry_id, parent_id, call_id):
+        return {
+            "type": "message", "id": entry_id, "parentId": parent_id,
+            "message": {"role": "toolResult", "toolName": "interview",
+                        "toolCallId": call_id, "content": [], "isError": False},
+        }
+
+    def write_entries(self, path, *entries):
+        path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+    def pi_agent(self, path, status="working"):
+        return agent(status, agent_session={
+            "source": "herdr:pi", "agent": "pi", "kind": "path", "value": str(path),
+        })
+
+    def test_unresolved_interview_call_is_pending_until_its_result_arrives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            pending = self.assistant_call("call-entry", None, "call-1")
+            self.write_entries(path, pending)
+            self.assertTrue(pp.session_has_pending_interview(path))
+            with path.open("a") as stream:
+                stream.write(json.dumps(self.tool_result(
+                    "result-entry", "call-entry", "call-1")) + "\n")
+            self.assertFalse(pp.session_has_pending_interview(path))
+
+    def test_only_the_active_session_branch_can_be_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            root = {"type": "message", "id": "root", "parentId": None,
+                    "message": {"role": "user", "content": "start"}}
+            orphan = self.assistant_call("orphan", "root", "old-call")
+            active = self.assistant_call("active", "root", "read-call", tool="read")
+            self.write_entries(path, root, orphan, active)
+            self.assertFalse(pp.session_has_pending_interview(path))
+
+    def test_malformed_message_content_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            self.write_entries(path, {
+                "type": "message", "id": "malformed", "parentId": None,
+                "message": {"role": "assistant", "content": {"unexpected": True}},
+            })
+            self.assertFalse(pp.session_has_pending_interview(path))
+
+    def test_detection_is_bounded_to_working_pi_session_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            self.write_entries(path, self.assistant_call("pending", None, "call-1"))
+            self.assertEqual(pp.pending_interview_sessions([self.pi_agent(path)]), {str(path)})
+            self.assertEqual(pp.pending_interview_sessions([self.pi_agent(path, "idle")]), set())
+            not_pi = self.pi_agent(path)
+            not_pi["agent"] = "codex"
+            self.assertEqual(pp.pending_interview_sessions([not_pi]), set())
+            symlink = Path(directory) / "linked.jsonl"
+            symlink.symlink_to(path)
+            self.assertFalse(pp.session_has_pending_interview(symlink))
+
+    def test_watcher_projection_reads_tracked_working_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = "/tmp/pp-interview-projection"
+            session = Path(directory) / "session.jsonl"
+            self.write_entries(session, self.assistant_call("pending", None, "call-1"))
+            with pp.state_lock(directory, socket_path) as state_path:
+                state = pp.load_state(state_path, "boot")
+                tracked = self.pi_agent(session)
+                state["agents"]["term-1"] = pp.observe(tracked)
+                pp.save_state(state_path, state)
+            cache = {}
+            self.assertEqual(
+                pp.tracked_pending_interview_sessions(directory, socket_path, cache),
+                {str(session)})
+            first_cache = cache[str(session)]
+            self.assertEqual(
+                pp.tracked_pending_interview_sessions(directory, socket_path, cache),
+                {str(session)})
+            self.assertIs(cache[str(session)], first_cache)
+            with session.open("a") as stream:
+                stream.write(json.dumps(self.tool_result(
+                    "result", "pending", "call-1")) + "\n")
+            self.assertEqual(
+                pp.tracked_pending_interview_sessions(directory, socket_path, cache), set())
+            self.assertNotEqual(cache[str(session)][0], first_cache[0])
+
+
 class WatcherTests(unittest.TestCase):
     def pane_event(self, **pane):
         return {"event": "pane_updated", "data": {"type": "pane_updated", "pane": pane}}
@@ -282,6 +385,25 @@ class WatcherTests(unittest.TestCase):
             tokens={pp.TOKEN: pp.RANK_PENDING},
         )
         self.assertFalse(pp.needs_reconcile_event(cleaned))
+
+    def test_interview_badge_edges_require_reconciliation(self):
+        active = self.pane_event(
+            pane_id="w1:p1", tokens={pp.TOKEN: pp.RANK_INTERVIEW},
+            state_labels={state: pp.INTERVIEW_LABEL for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(active))
+
+        overwritten = self.pane_event(
+            pane_id="w1:p1", tokens={pp.TOKEN: pp.RANK_INTERVIEW},
+            state_labels={"working": "other"},
+        )
+        self.assertTrue(pp.needs_reconcile_event(overwritten))
+
+        stale = self.pane_event(
+            pane_id="w1:p1", tokens={pp.TOKEN: pp.RANK_WORKING},
+            state_labels={"working": pp.INTERVIEW_LABEL},
+        )
+        self.assertTrue(pp.needs_reconcile_event(stale))
 
     def test_parallel_wait_metadata_edges_require_reconciliation(self):
         wait_label = pp.parallel_wait_label("history & release")
@@ -570,6 +692,46 @@ class ReconciliationTests(unittest.TestCase):
             self.assertNotIn("clear_state_labels", fields)
             self.assertEqual(set(fields["tokens"]), {pp.TOKEN})
         self.assertEqual(self.client.agents[0]["tokens"]["foreign"], "keep")
+
+    def test_pending_interview_outranks_working_and_clears_after_result(self):
+        session = Path(self.temp.name) / "session.jsonl"
+        call = {
+            "type": "message", "id": "assistant", "parentId": None,
+            "message": {"role": "assistant", "content": [{
+                "type": "toolCall", "id": "interview-call", "name": "interview",
+                "arguments": {"questions": "{}"},
+            }]},
+        }
+        session.write_text(json.dumps(call) + "\n")
+        self.client.agents[0] = agent(
+            "working", agent_session={"source": "herdr:pi", "agent": "pi",
+                                        "kind": "path", "value": str(session)},
+            tokens={"summary": "⏳ 1 subagent",
+                    pp.PARALLEL_WAIT_TARGET_TOKEN: "peer"},
+        )
+
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_INTERVIEW)
+        self.assertEqual(current["state_labels"], {
+            state: pp.INTERVIEW_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertTrue(self.state["agents"]["term-1"]["interview"])
+
+        result = {
+            "type": "message", "id": "result", "parentId": "assistant",
+            "message": {"role": "toolResult", "toolName": "interview",
+                        "toolCallId": "interview-call", "content": [], "isError": False},
+        }
+        with session.open("a") as stream:
+            stream.write(json.dumps(result) + "\n")
+        current["tokens"].pop("summary")
+        current["tokens"].pop(pp.PARALLEL_WAIT_TARGET_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn("state_labels", current)
+        self.assertFalse(self.state["agents"]["term-1"]["interview"])
 
     def test_active_subagent_ranks_below_working_and_reasserts_its_label(self):
         completed = pp.observe(agent("done", 1))
@@ -1013,7 +1175,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.9.0")
+        self.assertEqual(manifest["version"], "0.10.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

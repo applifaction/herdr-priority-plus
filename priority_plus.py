@@ -26,6 +26,7 @@ SESSION_TOKEN = "pp_session_sort"
 LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
 PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, LEGACY_CONTEXT_SUPPRESSION_TOKEN)
+RANK_INTERVIEW = "8"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
 RANK_WORKING = "5"
@@ -37,13 +38,15 @@ RANK_UNKNOWN = "0"
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
+INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.9.0"
+WATCHER_VERSION = "0.10.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
 SUBAGENT_STATUS_SCAN_LIMIT = 512
 SUBAGENT_STATUS_STALE_SECONDS = 10 * 60
+SESSION_TAIL_LIMIT = 1024 * 1024
 METADATA_TOKEN_CHAR_LIMIT = 80
 ACTIVE_RUN_STATES = ("queued", "running")
 TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
@@ -196,6 +199,7 @@ def load_state(path, boot):
                         and record["parallel_wait"] is not None
                         and not isinstance(record["parallel_wait"], str))
                     or ("waiting" in record and type(record["waiting"]) is not bool)
+                    or ("interview" in record and type(record["interview"]) is not bool)
                     or record.get("parking") not in (None, "later", "wait")):
                 raise RuntimeError("Invalid Priority+ agent record")
         if state.get("boot") != boot:
@@ -320,6 +324,133 @@ def has_active_subagents(agent, active_sessions=None):
     return isinstance(session, str) and session in (active_sessions or ())
 
 
+def pi_session_path(agent):
+    session = agent.get("agent_session") or {}
+    if (agent.get("agent") != "pi" or session.get("source") != "herdr:pi"
+            or session.get("agent") != "pi" or session.get("kind") != "path"):
+        return None
+    value = session.get("value")
+    return value if isinstance(value, str) and os.path.isabs(value) else None
+
+
+def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
+    """Inspect only the active JSONL branch's bounded tail for an unresolved interview call."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode):
+                return False
+            signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            cached = cache.get(path) if cache is not None else None
+            if cached and cached[0] == signature:
+                return cached[1]
+            start = max(0, info.st_size - tail_limit)
+            os.lseek(fd, start, os.SEEK_SET)
+            remaining = min(info.st_size - start, tail_limit)
+            chunks = []
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(fd)
+    except (OSError, TypeError, ValueError):
+        return False
+
+    payload = b"".join(chunks)
+    if start:
+        _, separator, payload = payload.partition(b"\n")
+        if not separator:
+            return False
+
+    messages = {}
+    head = None
+    for line in payload.splitlines():
+        try:
+            entry = json.loads(line)
+        except (UnicodeDecodeError, ValueError, TypeError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "message":
+            continue
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str):
+            continue
+        messages[entry_id] = entry
+        head = entry_id
+
+    pending = False
+    resolved = set()
+    visited = set()
+    while head in messages and head not in visited:
+        visited.add(head)
+        entry = messages[head]
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            message = {}
+        role = message.get("role")
+        if role == "toolResult" and message.get("toolName") == "interview":
+            call_id = message.get("toolCallId")
+            if isinstance(call_id, str):
+                resolved.add(call_id)
+        elif role == "assistant":
+            content = message.get("content")
+            if not isinstance(content, list):
+                content = []
+            calls = [
+                part.get("id")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "toolCall"
+                and part.get("name") == "interview" and isinstance(part.get("id"), str)
+            ]
+            if any(call_id not in resolved for call_id in calls):
+                pending = True
+                break
+        parent = entry.get("parentId")
+        head = parent if isinstance(parent, str) else None
+    if cache is not None:
+        cache[path] = (signature, pending)
+    return pending
+
+
+def pending_interview_sessions(agents):
+    sessions = set()
+    for agent in agents:
+        if agent.get("agent_status") != "working":
+            continue
+        session = pi_session_path(agent)
+        if session and session_has_pending_interview(session):
+            sessions.add(session)
+    return sessions
+
+
+def tracked_pending_interview_sessions(directory, socket_path, cache=None):
+    path = instance_folder(directory, socket_path) / "state.json"
+    try:
+        records = json.loads(path.read_text()).get("agents", {}).values()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+    sessions = set()
+    tracked_paths = set()
+    for record in records:
+        if not isinstance(record, dict) or record.get("status") != "working":
+            continue
+        identity = record.get("identity")
+        if (not isinstance(identity, list) or len(identity) != 5
+                or identity[:4] != ["pi", "herdr:pi", "pi", "path"]
+                or not isinstance(identity[4], str) or not os.path.isabs(identity[4])):
+            continue
+        tracked_paths.add(identity[4])
+        if session_has_pending_interview(identity[4], cache=cache):
+            sessions.add(identity[4])
+    if cache is not None:
+        for session in set(cache) - tracked_paths:
+            cache.pop(session, None)
+    return sessions
+
+
 def parallel_wait_target(agent):
     target = (agent.get("tokens") or {}).get(PARALLEL_WAIT_TARGET_TOKEN)
     if not isinstance(target, str):
@@ -353,6 +484,11 @@ def needs_reconcile_event(message):
         labels = {}
     if labels.get("idle") == LEGACY_PENDING_LABEL:
         return True
+    interview_visible = (tokens.get(TOKEN) == RANK_INTERVIEW
+                         or any(label == INTERVIEW_LABEL for label in labels.values()))
+    if interview_visible:
+        return (tokens.get(TOKEN) != RANK_INTERVIEW
+                or any(labels.get(status) != INTERVIEW_LABEL for status in SUBAGENT_STATES))
     wait_target = parallel_wait_target(pane)
     if wait_target:
         wait_label = parallel_wait_label(wait_target)
@@ -439,7 +575,7 @@ def watch_events(socket_path, on_reconcile, on_ready=None, on_tick=None,
         watcher.close()
 
 
-def observe(agent, previous=None, parking=None, active_sessions=None):
+def observe(agent, previous=None, parking=None, active_sessions=None, interview_sessions=None):
     # Keep the persisted v1 `waiting` field for backward-compatible state files.
     session = agent.get("agent_session") or {}
     identity = [agent.get("agent"), session.get("source"), session.get("agent"),
@@ -454,13 +590,18 @@ def observe(agent, previous=None, parking=None, active_sessions=None):
                    or seq > previous["seq"])
     # Working/blocked/unknown are not a completed run. Keep the underlying
     # pending flag while a child runs so its completion priority can return afterwards.
+    session_path = pi_session_path(agent)
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
             "subagent": has_active_subagents(agent, active_sessions),
-            "parallel_wait": parallel_wait_target(agent), "waiting": parking is not None,
-            "parking": parking, "applied": previous.get("applied") if previous else None}
+            "parallel_wait": parallel_wait_target(agent),
+            "interview": session_path in (interview_sessions or ()),
+            "waiting": parking is not None, "parking": parking,
+            "applied": previous.get("applied") if previous else None}
 
 
 def rank(record):
+    if record.get("interview"):
+        return RANK_INTERVIEW
     # Waiting on conflicting peer work stays in the active working tier.
     if record.get("parallel_wait"):
         return RANK_WORKING
@@ -515,10 +656,12 @@ def reconcile(client, state, path):
     tab_label_by_id = {tab["tab_id"]: tab.get("label") for tab in tabs}
     previous = state["agents"]
     active_sessions = active_subagent_sessions()
+    interview_sessions = pending_interview_sessions(agents)
     records = {
         agent["terminal_id"]: observe(
             agent, previous.get(agent["terminal_id"]),
-            parking_by_workspace.get(agent.get("workspace_id")), active_sessions)
+            parking_by_workspace.get(agent.get("workspace_id")), active_sessions,
+            interview_sessions)
         for agent in agents
     }
     # Save observations BEFORE side effects, so a killed hook cannot lose a
@@ -556,8 +699,14 @@ def reconcile(client, state, path):
         }
         if token_updates:
             fields["tokens"] = token_updates
-        # Cache emitted text so dynamic waiting/subagent labels stay idempotent.
-        if record["parallel_wait"]:
+        # Cache emitted text so dynamic interview/waiting/subagent labels stay idempotent.
+        if record["interview"]:
+            label_state = INTERVIEW_LABEL
+            labels = agent.get("state_labels") or {}
+            if (record["applied"] != label_state
+                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
+                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
+        elif record["parallel_wait"]:
             label_state = parallel_wait_label(record["parallel_wait"])
             labels = agent.get("state_labels") or {}
             if (record["applied"] != label_state
@@ -575,6 +724,7 @@ def reconcile(client, state, path):
             label_state = False
             labels = agent.get("state_labels") or {}
             stale_badge = (labels.get("idle") == LEGACY_PENDING_LABEL
+                           or any(label == INTERVIEW_LABEL for label in labels.values())
                            or any(isinstance(label, str)
                                   and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
                                   for label in labels.values()))
@@ -667,15 +817,23 @@ def run_watcher(directory, socket_path):
         os.write(fd, f"{os.getpid()} {WATCHER_VERSION}".encode())
         os.fsync(fd)
         reconcile_now = lambda: run("sync", directory, socket_path)
-        projection = active_subagent_sessions()
+        subagent_projection = active_subagent_sessions()
+        interview_cache = {}
+        interview_projection = tracked_pending_interview_sessions(
+            directory, socket_path, interview_cache)
         last_full_reconcile = time.monotonic()
 
         def tick():
-            nonlocal projection, last_full_reconcile
-            current = active_subagent_sessions()
+            nonlocal subagent_projection, interview_projection, last_full_reconcile
+            current_subagents = active_subagent_sessions()
+            current_interviews = tracked_pending_interview_sessions(
+                directory, socket_path, interview_cache)
             now = time.monotonic()
-            if current != projection or now - last_full_reconcile >= WATCH_FULL_RECONCILE_SECONDS:
-                projection = current
+            if (current_subagents != subagent_projection
+                    or current_interviews != interview_projection
+                    or now - last_full_reconcile >= WATCH_FULL_RECONCILE_SECONDS):
+                subagent_projection = current_subagents
+                interview_projection = current_interviews
                 last_full_reconcile = now
                 return reconcile_now()
             return True
