@@ -95,13 +95,13 @@ class LifecycleTests(unittest.TestCase):
         parallel_wait = pp.observe(agent(
             "idle", tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release"}))
         self.assertEqual(parallel_wait["parallel_wait"], "history & release")
-        self.assertEqual(pp.rank(parallel_wait), pp.RANK_WORKING)
+        self.assertEqual(pp.rank(parallel_wait), pp.RANK_DEPENDENCY_WAIT)
         resource_wait = pp.observe(agent("done", tokens={
             pp.RESOURCE_WAIT_TICKET_TOKEN: "ticket-1",
             pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3",
         }))
         self.assertEqual(resource_wait["parallel_wait"], "image 3")
-        self.assertEqual(pp.rank(resource_wait), pp.RANK_WORKING)
+        self.assertEqual(pp.rank(resource_wait), pp.RANK_DEPENDENCY_WAIT)
         incomplete_resource_wait = pp.observe(agent(
             "done", tokens={pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3"}))
         self.assertIsNone(incomplete_resource_wait["parallel_wait"])
@@ -785,7 +785,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
         self.assertNotIn("state_labels", self.client.agents[0])
 
-    def test_parallel_wait_uses_working_rank_and_dynamic_label_then_cleans_up(self):
+    def test_parallel_wait_ranks_below_working_and_dynamic_label_then_cleans_up(self):
         self.client.agents[0] = agent(
             "idle", 1,
             tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release",
@@ -794,7 +794,8 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         wait_label = pp.parallel_wait_label("history & release")
         current = self.client.agents[0]
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_DEPENDENCY_WAIT)
+        self.assertLess(pp.RANK_DEPENDENCY_WAIT, pp.RANK_WORKING)
         self.assertEqual(current["tokens"][pp.PARALLEL_WAIT_TARGET_TOKEN], "history & release")
         self.assertEqual(current["state_labels"], {
             state: wait_label for state in pp.SUBAGENT_STATES
@@ -820,7 +821,8 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         current = self.client.agents[0]
         wait_label = pp.parallel_wait_label("image 3")
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_DEPENDENCY_WAIT)
+        self.assertLess(pp.RANK_DEPENDENCY_WAIT, pp.RANK_WORKING)
         self.assertEqual(current["tokens"][pp.RESOURCE_WAIT_TICKET_TOKEN], "ticket-1")
         self.assertEqual(current["tokens"][pp.RESOURCE_WAIT_PREDECESSOR_TOKEN], "image 3")
         self.assertEqual(current["state_labels"], {
@@ -1220,7 +1222,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.11.0")
+        self.assertEqual(manifest["version"], "0.12.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

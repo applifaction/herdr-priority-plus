@@ -32,6 +32,7 @@ RANK_INTERVIEW = "8"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
 RANK_WORKING = "5"
+RANK_DEPENDENCY_WAIT = "4"
 RANK_SUBAGENT = "4"
 RANK_IDLE = "3"
 RANK_LATER = "2"
@@ -42,7 +43,7 @@ SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.11.0"
+WATCHER_VERSION = "0.12.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -610,9 +611,9 @@ def rank(record):
     if record.get("interview"):
         return RANK_INTERVIEW
     # Waiting on conflicting peer work or a durable resource-queue predecessor
-    # stays below sessions that need a user response, in the active working tier.
+    # stays below every directly working session.
     if record.get("parallel_wait"):
-        return RANK_WORKING
+        return RANK_DEPENDENCY_WAIT
     if record.get("subagent"):
         return RANK_SUBAGENT
     if record["status"] == "blocked":
