@@ -96,6 +96,16 @@ class LifecycleTests(unittest.TestCase):
             "idle", tokens={pp.PARALLEL_WAIT_TARGET_TOKEN: "history & release"}))
         self.assertEqual(parallel_wait["parallel_wait"], "history & release")
         self.assertEqual(pp.rank(parallel_wait), pp.RANK_WORKING)
+        resource_wait = pp.observe(agent("done", tokens={
+            pp.RESOURCE_WAIT_TICKET_TOKEN: "ticket-1",
+            pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3",
+        }))
+        self.assertEqual(resource_wait["parallel_wait"], "image 3")
+        self.assertEqual(pp.rank(resource_wait), pp.RANK_WORKING)
+        incomplete_resource_wait = pp.observe(agent(
+            "done", tokens={pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3"}))
+        self.assertIsNone(incomplete_resource_wait["parallel_wait"])
+        self.assertEqual(pp.rank(incomplete_resource_wait), pp.RANK_PENDING)
         interview_agent = agent(
             "working", agent_session={"source": "herdr:pi", "agent": "pi",
                                         "kind": "path", "value": "/sessions/interview.jsonl"})
@@ -420,6 +430,16 @@ class WatcherTests(unittest.TestCase):
             state_labels={state: wait_label for state in pp.SUBAGENT_STATES},
         )
         self.assertFalse(pp.needs_reconcile_event(converged))
+
+        resource_wait = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.RESOURCE_WAIT_TICKET_TOKEN: "ticket-1",
+                    pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3",
+                    pp.TOKEN: pp.RANK_PENDING},
+            state_labels={state: pp.parallel_wait_label("image 3")
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertTrue(pp.needs_reconcile_event(resource_wait))
 
         removed = self.pane_event(
             pane_id="w1:p1",
@@ -788,6 +808,31 @@ class ReconciliationTests(unittest.TestCase):
         self.client.calls.clear()
         self.sync()
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_IDLE)
+        self.assertNotIn("state_labels", current)
+
+    def test_resource_queue_wait_moves_completion_below_reply_required_sessions(self):
+        self.client.agents[0] = agent(
+            "done", 1,
+            tokens={pp.RESOURCE_WAIT_TICKET_TOKEN: "ticket-1",
+                    pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3",
+                    pp.TOKEN: pp.RANK_PENDING},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        wait_label = pp.parallel_wait_label("image 3")
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertEqual(current["tokens"][pp.RESOURCE_WAIT_TICKET_TOKEN], "ticket-1")
+        self.assertEqual(current["tokens"][pp.RESOURCE_WAIT_PREDECESSOR_TOKEN], "image 3")
+        self.assertEqual(current["state_labels"], {
+            state: wait_label for state in pp.SUBAGENT_STATES
+        })
+        self.assertTrue(self.state["agents"]["term-1"]["pending"])
+
+        current["tokens"].pop(pp.RESOURCE_WAIT_TICKET_TOKEN)
+        current["tokens"].pop(pp.RESOURCE_WAIT_PREDECESSOR_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
     def test_upgrade_removes_legacy_pending_presentation_and_token(self):
@@ -1175,7 +1220,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.10.0")
+        self.assertEqual(manifest["version"], "0.11.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

@@ -14,7 +14,7 @@
 
 A small [Herdr](https://herdr.dev) plugin that keeps **viewed completions above running agents** until the next work cycle. Opening a finished session no longer means losing track of it at the bottom of your queue.
 
-Built for multi-session Pi workflows, Priority+ uses Herdr's lifecycle and display metadata for normal ranking. It additionally inspects a bounded tail of active Pi session files to detect an unresolved `interview` tool call. Inside every priority tier, it groups sessions by the visible **Spaces order** and then sorts them alphabetically by tab name within each Space. It adds conditional badges for **pending interviews**, **subagent work**, and **asynchronous peer waits**, and provides a toggleable Agents view. Native status icons stay unchanged.
+Built for multi-session Pi workflows, Priority+ uses Herdr's lifecycle and display metadata for normal ranking. It additionally inspects a bounded tail of active Pi session files to detect an unresolved `interview` tool call. Inside every priority tier, it groups sessions by the visible **Spaces order** and then sorts them alphabetically by tab name within each Space. It adds conditional badges for **pending interviews**, **subagent work**, and **asynchronous peer or resource-queue waits**, and provides a toggleable Agents view. Native status icons stay unchanged.
 
 With Herdr's symbol indicators enabled:
 
@@ -47,7 +47,7 @@ The additional badges read **`⚠ Interview Pending`**, **`⏳ Subagent working`
 | 3 | Completed, not viewed outside `LATER…`/`WAIT…` | Keeps Herdr's native done indicator near the top and groups it by Spaces order. |
 | 4 | Completed, viewed, no new run | Stays above ordinary working agents without an extra badge and groups it by Spaces order. |
 | 5 | Working | Clears the previous completion marker. |
-| 5 | Waiting on another Pi session | Shows `⏳ Warte auf <Tab/Session>` and stays in the working tier, ordered there by Space and tab name. |
+| 5 | Waiting on another Pi session or a durable resource-queue predecessor | Shows `⏳ Warte auf <Tab/Session>` and stays in the working tier, below sessions that need a user response. |
 | 6 | Active pi-subagents child | Shows `⏳ Subagent working` below directly working agents. |
 | 7 | Ordinary idle | Remains below active work. |
 | 8 | Inactive in `LATER…` | Stays below ordinary idle. |
@@ -108,7 +108,7 @@ The first three rules show Priority+'s activity badges; the final rule hides eve
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** Version 0.10.0 adds pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
+> **Upgrading:** Version 0.11.0 also recognizes durable resource-queue waits and keeps them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -183,7 +183,7 @@ Short-lived hooks reconcile Herdr's agent, workspace, and tab snapshots and trac
 
 While a Pi agent remains `working`, Priority+ checks the bounded tail of its reported JSONL session path for an unresolved `interview` tool call on the active branch. That pane moves above blocked sessions and shows `⚠ Interview Pending`. The watcher notices both the call and its matching tool result without waiting for a lifecycle transition; after the result arrives, the ordinary working rank and label return.
 
-When the Pi Parallel Session Watch extension publishes `parallel_wait_target`, Priority+ places that pane in the same rank as directly working agents and shows `⏳ Warte auf <target>`. The extension retains ownership of the wait token; Priority+ only projects it. Removing the token restores the underlying lifecycle/completion rank and clears the dynamic label.
+When the Pi Parallel Session Watch extension publishes `parallel_wait_target`, Priority+ places that pane in the same rank as directly working agents and shows `⏳ Warte auf <target>`. Durable resource-queue waits receive the same treatment when the extension publishes both `parallel_wait_resource_ticket` and `parallel_wait_predecessor`. This keeps a settled Pi turn that is still waiting out of the higher reply-required completion tier. The extension retains ownership of all wait tokens; Priority+ only projects them. Removing the relevant tokens restores the underlying lifecycle/completion rank and clears the dynamic label.
 
 When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. If that best-effort metadata is missing, Priority+ falls back to live, same-user pi-subagents status artifacts and matches their parent session path to Herdr's agent-session identity. The original completion state remains intact underneath. Because Herdr deliberately excludes high-volume `pane.updated` events from manifest hooks, startup and low-volume hooks supervise one detached per-server socket watcher. It selects peer-wait, subagent-summary, and legacy-label cleanup edges, recovers `events_lost`, and reconciles when the active-session projection changes; unrelated pane updates are ignored.
 
@@ -200,7 +200,7 @@ Interview detection is the only transcript inspection: it reads at most the last
 - **Space order is user-controlled.** Priority+ mirrors the current visible order inside every Agents tier and never moves Spaces itself. Drag-and-drop changes therefore become the new ordering source immediately, including for LATER, WAIT, and linked-worktree Spaces.
 - **Session-name sorting is case-insensitive, not locale-aware.** Every tier uses Unicode case folding on displayed tab labels within a Space; Space ordering itself is never alphabetical unless the user arranged it that way.
 - **Single-server support.** Combined multi-machine views are unsupported. Simultaneous clients have not been end-to-end validated.
-- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `parallel_wait_target` is intentionally foreign metadata owned by the Pi watcher extension; Priority+ reads but never clears it.
+- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `parallel_wait_target`, `parallel_wait_resource_ticket`, and `parallel_wait_predecessor` are intentionally foreign metadata owned by the Pi watcher extension; Priority+ reads but never clears them.
 - **Views are shared:** enable/startup can replace another plugin's view. Ordinary hooks never reclaim it; clearing affects only Priority+'s view.
 - **Other idle labels may override the badge.** Cleanup removes only this plugin's label contribution and leaves unrelated tokens alone.
 

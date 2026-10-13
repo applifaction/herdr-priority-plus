@@ -25,6 +25,8 @@ WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
 LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
 PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
+RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
+RESOURCE_WAIT_PREDECESSOR_TOKEN = "parallel_wait_predecessor"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_INTERVIEW = "8"
 RANK_BLOCKED = "7"
@@ -40,7 +42,7 @@ SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.10.0"
+WATCHER_VERSION = "0.11.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -452,7 +454,12 @@ def tracked_pending_interview_sessions(directory, socket_path, cache=None):
 
 
 def parallel_wait_target(agent):
-    target = (agent.get("tokens") or {}).get(PARALLEL_WAIT_TARGET_TOKEN)
+    tokens = agent.get("tokens") or {}
+    target = tokens.get(PARALLEL_WAIT_TARGET_TOKEN)
+    if not isinstance(target, str):
+        ticket = tokens.get(RESOURCE_WAIT_TICKET_TOKEN)
+        target = (tokens.get(RESOURCE_WAIT_PREDECESSOR_TOKEN)
+                  if isinstance(ticket, str) and ticket.strip() else None)
     if not isinstance(target, str):
         return None
     target = " ".join(target.split())
@@ -602,7 +609,8 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
 def rank(record):
     if record.get("interview"):
         return RANK_INTERVIEW
-    # Waiting on conflicting peer work stays in the active working tier.
+    # Waiting on conflicting peer work or a durable resource-queue predecessor
+    # stays below sessions that need a user response, in the active working tier.
     if record.get("parallel_wait"):
         return RANK_WORKING
     if record.get("subagent"):
