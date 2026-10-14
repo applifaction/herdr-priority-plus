@@ -338,6 +338,28 @@ class InterviewDetectionTests(unittest.TestCase):
             })
             self.assertFalse(pp.session_has_pending_interview(path))
 
+    def test_completed_response_requires_latest_visible_assistant_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            user = {"type": "message", "id": "user", "parentId": None,
+                    "message": {"role": "user", "content": "start"}}
+            response = {"type": "message", "id": "response", "parentId": "user",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "thinking", "thinking": "done"},
+                            {"type": "text", "text": "Ready."},
+                        ]}}
+            self.write_entries(path, user, response)
+            self.assertTrue(pp.session_has_completed_response(path))
+
+            self.write_entries(path, user, self.assistant_call(
+                "call", "user", "read-call", tool="read"))
+            self.assertFalse(pp.session_has_completed_response(path))
+
+            follow_up = {"type": "message", "id": "follow-up", "parentId": "response",
+                         "message": {"role": "user", "content": "change it"}}
+            self.write_entries(path, user, response, follow_up)
+            self.assertFalse(pp.session_has_completed_response(path))
+
     def test_detection_is_bounded_to_working_pi_session_files(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
@@ -690,6 +712,56 @@ class ReconciliationTests(unittest.TestCase):
 
     def writes(self):
         return [p for m, p in self.client.calls if m == "pane.report_metadata"]
+
+    def test_bootstrap_recovers_idle_pi_completion_from_transcript(self):
+        session = Path(self.temp.name) / "session.jsonl"
+        entries = [
+            {"type": "message", "id": "user", "parentId": None,
+             "message": {"role": "user", "content": "do the work"}},
+            {"type": "message", "id": "assistant", "parentId": "user",
+             "message": {"role": "assistant", "content": [
+                 {"type": "thinking", "thinking": "done"},
+                 {"type": "text", "text": "The result is ready."},
+             ]}},
+        ]
+        session.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        self.client.agents[0] = agent(
+            "idle", agent_session={"source": "herdr:pi", "agent": "pi",
+                                     "kind": "path", "value": str(session)},
+        )
+
+        self.sync()
+
+        self.assertTrue(self.state["agents"]["term-1"]["pending"])
+        self.assertTrue(self.state["agents"]["term-1"]["transcript_checked"])
+        self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], pp.RANK_PENDING)
+        self.client.calls.clear()
+        with patch("priority_plus.session_has_completed_response",
+                   side_effect=AssertionError("transcript recovery repeated")):
+            self.sync()
+        self.assertEqual(self.writes(), [])
+
+    def test_upgrade_recovers_unclassified_idle_completion(self):
+        session = Path(self.temp.name) / "session.jsonl"
+        session.write_text(json.dumps({
+            "type": "message", "id": "assistant", "parentId": None,
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Awaiting your reply."},
+            ]},
+        }) + "\n")
+        current = agent(
+            "idle", agent_session={"source": "herdr:pi", "agent": "pi",
+                                     "kind": "path", "value": str(session)},
+        )
+        self.client.agents[0] = current
+        legacy_record = pp.observe(current)
+        legacy_record.pop("transcript_checked")
+        self.state["agents"]["term-1"] = legacy_record
+
+        self.sync()
+
+        self.assertTrue(self.state["agents"]["term-1"]["pending"])
+        self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], pp.RANK_PENDING)
 
     def test_idempotence_all_writes_owned_and_foreign_metadata_untouched(self):
         self.client.agents[0]["tokens"] = {"foreign": "keep"}
@@ -1222,7 +1294,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.12.0")
+        self.assertEqual(manifest["version"], "0.12.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

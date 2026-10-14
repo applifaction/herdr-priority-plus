@@ -43,7 +43,7 @@ SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.12.0"
+WATCHER_VERSION = "0.12.1"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -203,6 +203,8 @@ def load_state(path, boot):
                         and not isinstance(record["parallel_wait"], str))
                     or ("waiting" in record and type(record["waiting"]) is not bool)
                     or ("interview" in record and type(record["interview"]) is not bool)
+                    or ("transcript_checked" in record
+                        and type(record["transcript_checked"]) is not bool)
                     or record.get("parking") not in (None, "later", "wait")):
                 raise RuntimeError("Invalid Priority+ agent record")
         if state.get("boot") != boot:
@@ -336,8 +338,8 @@ def pi_session_path(agent):
     return value if isinstance(value, str) and os.path.isabs(value) else None
 
 
-def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
-    """Inspect only the active JSONL branch's bounded tail for an unresolved interview call."""
+def inspect_session_tail(path, projector, tail_limit=SESSION_TAIL_LIMIT, cache=None):
+    """Apply a metadata-only projection to a bounded, same-user Pi JSONL tail."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
@@ -368,7 +370,13 @@ def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=Non
         _, separator, payload = payload.partition(b"\n")
         if not separator:
             return False
+    result = projector(payload)
+    if cache is not None:
+        cache[path] = (signature, result)
+    return result
 
+
+def session_messages(payload):
     messages = {}
     head = None
     for line in payload.splitlines():
@@ -383,8 +391,11 @@ def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=Non
             continue
         messages[entry_id] = entry
         head = entry_id
+    return messages, head
 
-    pending = False
+
+def tail_has_pending_interview(payload):
+    messages, head = session_messages(payload)
     resolved = set()
     visited = set()
     while head in messages and head not in visited:
@@ -409,13 +420,36 @@ def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=Non
                 and part.get("name") == "interview" and isinstance(part.get("id"), str)
             ]
             if any(call_id not in resolved for call_id in calls):
-                pending = True
-                break
+                return True
         parent = entry.get("parentId")
         head = parent if isinstance(parent, str) else None
-    if cache is not None:
-        cache[path] = (signature, pending)
-    return pending
+    return False
+
+
+def tail_has_completed_response(payload):
+    messages, head = session_messages(payload)
+    entry = messages.get(head)
+    message = entry.get("message") if isinstance(entry, dict) else None
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(part, dict) and part.get("type") == "text"
+        and isinstance(part.get("text"), str) and bool(part["text"].strip())
+        for part in content
+    )
+
+
+def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
+    """Inspect only the active JSONL branch's bounded tail for an unresolved interview call."""
+    return inspect_session_tail(path, tail_has_pending_interview, tail_limit, cache)
+
+
+def session_has_completed_response(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
+    """Return whether the active JSONL branch ends in a visible assistant response."""
+    return inspect_session_tail(path, tail_has_completed_response, tail_limit, cache)
 
 
 def pending_interview_sessions(agents):
@@ -583,19 +617,52 @@ def watch_events(socket_path, on_reconcile, on_ready=None, on_tick=None,
         watcher.close()
 
 
-def observe(agent, previous=None, parking=None, active_sessions=None, interview_sessions=None):
-    # Keep the persisted v1 `waiting` field for backward-compatible state files.
+def observation_identity(agent):
     session = agent.get("agent_session") or {}
-    identity = [agent.get("agent"), session.get("source"), session.get("agent"),
-                session.get("kind"), session.get("value")]
+    return [agent.get("agent"), session.get("source"), session.get("agent"),
+            session.get("kind"), session.get("value")]
+
+
+def compatible_observation(agent, previous):
+    if not previous:
+        return None
+    if (previous["identity"] != observation_identity(agent)
+            or agent["state_change_seq"] < previous["seq"]):
+        return None
+    return previous
+
+
+def completion_recoveries(agents, previous):
+    """Inspect each unclassified idle Pi transcript once per compatible observation."""
+    recoveries = {}
+    for agent in agents:
+        if agent.get("agent_status") != "idle":
+            continue
+        prior = compatible_observation(agent, previous.get(agent["terminal_id"]))
+        if prior and prior.get("transcript_checked") is True:
+            continue
+        session = pi_session_path(agent)
+        if session:
+            recoveries[agent["terminal_id"]] = session_has_completed_response(session)
+    return recoveries
+
+
+def observe(agent, previous=None, parking=None, active_sessions=None, interview_sessions=None,
+            recovered_completions=None):
+    # Keep the persisted v1 `waiting` field for backward-compatible state files.
+    identity = observation_identity(agent)
     status = agent["agent_status"]
     seq = agent["state_change_seq"]
-    if previous and (previous["identity"] != identity or seq < previous["seq"]):
-        previous = None
+    previous = compatible_observation(agent, previous)
     pending = status == "done"
     if status == "idle" and previous:
         pending = (previous["pending"] or previous["status"] in ("working", "blocked")
                    or seq > previous["seq"])
+    transcript_checked = previous.get("transcript_checked", False) if previous else False
+    recovered_completions = recovered_completions or {}
+    if status == "idle" and agent["terminal_id"] in recovered_completions:
+        pending = pending or recovered_completions[agent["terminal_id"]]
+        transcript_checked = True
     # Working/blocked/unknown are not a completed run. Keep the underlying
     # pending flag while a child runs so its completion priority can return afterwards.
     session_path = pi_session_path(agent)
@@ -603,6 +670,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "subagent": has_active_subagents(agent, active_sessions),
             "parallel_wait": parallel_wait_target(agent),
             "interview": session_path in (interview_sessions or ()),
+            "transcript_checked": transcript_checked,
             "waiting": parking is not None, "parking": parking,
             "applied": previous.get("applied") if previous else None}
 
@@ -666,11 +734,12 @@ def reconcile(client, state, path):
     previous = state["agents"]
     active_sessions = active_subagent_sessions()
     interview_sessions = pending_interview_sessions(agents)
+    recovered_completions = completion_recoveries(agents, previous)
     records = {
         agent["terminal_id"]: observe(
             agent, previous.get(agent["terminal_id"]),
             parking_by_workspace.get(agent.get("workspace_id")), active_sessions,
-            interview_sessions)
+            interview_sessions, recovered_completions)
         for agent in agents
     }
     # Save observations BEFORE side effects, so a killed hook cannot lose a
