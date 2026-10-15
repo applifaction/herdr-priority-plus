@@ -42,7 +42,7 @@ status_indicators = "symbols"
 [ui.sound]
 enabled = false
 [ui.sidebar.agents]
-rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠ Interview Pending", fg = "#cb4b16", bold = true }, { equals = "⏳ Subagent working", fg = "#268bd2", bold = true }, { contains = "", hide = true }] }]]
+rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠ Interview Pending", fg = "#cb4b16", bold = true }, { equals = "⏳ Waiting for internet", fg = "#268bd2", bold = true }, { equals = "⏳ Subagent working", fg = "#268bd2", bold = true }, { contains = "", hide = true }] }]]
 ''')
 
     def rpc(method, params=None):

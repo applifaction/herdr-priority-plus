@@ -76,6 +76,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
+        self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
     def test_bootstrap_and_all_ranks(self):
@@ -113,6 +114,11 @@ class LifecycleTests(unittest.TestCase):
             interview_agent, interview_sessions={"/sessions/interview.jsonl"})
         self.assertTrue(interview["interview"])
         self.assertEqual(pp.rank(interview), pp.RANK_INTERVIEW)
+        internet = pp.observe(
+            interview_agent, internet_waits={"/sessions/interview.jsonl"})
+        self.assertTrue(internet["internet_wait"])
+        self.assertEqual(pp.rank(internet), pp.RANK_INTERNET_WAIT)
+        self.assertLess(pp.RANK_INTERNET_WAIT, pp.RANK_WORKING)
 
     def test_transitions_and_review(self):
         record = None
@@ -300,6 +306,16 @@ class InterviewDetectionTests(unittest.TestCase):
                         "toolCallId": call_id, "content": [], "isError": False},
         }
 
+    def assistant_error(self, entry_id="error", parent_id=None, error_message=None):
+        error_message = error_message or (
+            '{"error":"acp-proxy failure","detail":"upstream request failed: '
+            'kind=upstream-timeout code=ETIMEDOUT message=fetch failed"}')
+        return {
+            "type": "message", "id": entry_id, "parentId": parent_id,
+            "message": {"role": "assistant", "stopReason": "error",
+                        "errorMessage": error_message, "content": []},
+        }
+
     def write_entries(self, path, *entries):
         path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
 
@@ -360,6 +376,25 @@ class InterviewDetectionTests(unittest.TestCase):
             self.write_entries(path, user, response, follow_up)
             self.assertFalse(pp.session_has_completed_response(path))
 
+    def test_network_failure_at_active_head_is_an_internet_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            failed = self.assistant_error()
+            context_edit = {"type": "context_edit", "id": "omit", "parentId": "error"}
+            self.write_entries(path, failed, context_edit)
+            self.assertTrue(pp.session_waits_for_internet(path))
+            self.assertEqual(pp.internet_wait_sessions([self.pi_agent(path)]), {str(path)})
+            self.assertEqual(pp.internet_wait_sessions([self.pi_agent(path, "idle")]), set())
+
+            self.write_entries(path, self.assistant_error(
+                error_message="Invalid API key"))
+            self.assertFalse(pp.session_waits_for_internet(path))
+
+            recovered = {"type": "message", "id": "recovered", "parentId": "error",
+                         "message": {"role": "user", "content": "retry now"}}
+            self.write_entries(path, failed, recovered)
+            self.assertFalse(pp.session_waits_for_internet(path))
+
     def test_detection_is_bounded_to_working_pi_session_files(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
@@ -399,6 +434,27 @@ class InterviewDetectionTests(unittest.TestCase):
                 pp.tracked_pending_interview_sessions(directory, socket_path, cache), set())
             self.assertNotEqual(cache[str(session)][0], first_cache[0])
 
+    def test_watcher_projection_tracks_internet_wait_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = "/tmp/pp-internet-projection"
+            session = Path(directory) / "session.jsonl"
+            self.write_entries(session, self.assistant_error())
+            with pp.state_lock(directory, socket_path) as state_path:
+                state = pp.load_state(state_path, "boot")
+                state["agents"]["term-1"] = pp.observe(self.pi_agent(session))
+                pp.save_state(state_path, state)
+            cache = {}
+            self.assertEqual(
+                pp.tracked_internet_wait_sessions(directory, socket_path, cache),
+                {str(session)})
+            with session.open("a") as stream:
+                stream.write(json.dumps({
+                    "type": "message", "id": "user", "parentId": "error",
+                    "message": {"role": "user", "content": "retry now"},
+                }) + "\n")
+            self.assertEqual(
+                pp.tracked_internet_wait_sessions(directory, socket_path, cache), set())
+
 
 class WatcherTests(unittest.TestCase):
     def pane_event(self, **pane):
@@ -434,6 +490,24 @@ class WatcherTests(unittest.TestCase):
         stale = self.pane_event(
             pane_id="w1:p1", tokens={pp.TOKEN: pp.RANK_WORKING},
             state_labels={"working": pp.INTERVIEW_LABEL},
+        )
+        self.assertTrue(pp.needs_reconcile_event(stale))
+
+    def test_internet_wait_badge_edges_require_reconciliation(self):
+        active = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.TOKEN: pp.RANK_INTERNET_WAIT, pp.INTERNET_WAIT_TOKEN: "1"},
+            state_labels={state: pp.INTERNET_WAIT_LABEL for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(active))
+
+        overwritten = copy.deepcopy(active)
+        overwritten["data"]["pane"]["state_labels"] = {"working": "other"}
+        self.assertTrue(pp.needs_reconcile_event(overwritten))
+
+        stale = self.pane_event(
+            pane_id="w1:p1", tokens={pp.TOKEN: pp.RANK_WORKING},
+            state_labels={"working": pp.INTERNET_WAIT_LABEL},
         )
         self.assertTrue(pp.needs_reconcile_event(stale))
 
@@ -824,6 +898,40 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
         self.assertNotIn("state_labels", current)
         self.assertFalse(self.state["agents"]["term-1"]["interview"])
+
+    def test_internet_wait_ranks_below_working_and_clears_after_recovery(self):
+        session = Path(self.temp.name) / "session.jsonl"
+        failed = {
+            "type": "message", "id": "failed", "parentId": None,
+            "message": {"role": "assistant", "stopReason": "error", "content": [],
+                        "errorMessage": "upstream request failed: code=ENETUNREACH fetch failed"},
+        }
+        session.write_text(json.dumps(failed) + "\n")
+        self.client.agents[0] = agent(
+            "working", agent_session={"source": "herdr:pi", "agent": "pi",
+                                        "kind": "path", "value": str(session)},
+        )
+
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_INTERNET_WAIT)
+        self.assertEqual(current["tokens"][pp.INTERNET_WAIT_TOKEN], "1")
+        self.assertEqual(current["state_labels"], {
+            state: pp.INTERNET_WAIT_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertTrue(self.state["agents"]["term-1"]["internet_wait"])
+
+        with session.open("a") as stream:
+            stream.write(json.dumps({
+                "type": "message", "id": "retry", "parentId": "failed",
+                "message": {"role": "user", "content": "retry"},
+            }) + "\n")
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn(pp.INTERNET_WAIT_TOKEN, current["tokens"])
+        self.assertNotIn("state_labels", current)
+        self.assertFalse(self.state["agents"]["term-1"]["internet_wait"])
 
     def test_active_subagent_ranks_below_working_and_reasserts_its_label(self):
         completed = pp.observe(agent("done", 1))
@@ -1294,7 +1402,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.12.1")
+        self.assertEqual(manifest["version"], "0.13.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

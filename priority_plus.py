@@ -23,15 +23,18 @@ SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
 WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
+INTERNET_WAIT_TOKEN = "pp_internet_wait"
 LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
 PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
 RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
 RESOURCE_WAIT_PREDECESSOR_TOKEN = "parallel_wait_predecessor"
-OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, LEGACY_CONTEXT_SUPPRESSION_TOKEN)
+OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, INTERNET_WAIT_TOKEN,
+                LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_INTERVIEW = "8"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
 RANK_WORKING = "5"
+RANK_INTERNET_WAIT = "4"
 RANK_DEPENDENCY_WAIT = "4"
 RANK_SUBAGENT = "4"
 RANK_IDLE = "3"
@@ -41,9 +44,10 @@ RANK_UNKNOWN = "0"
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
+INTERNET_WAIT_LABEL = "⏳ Waiting for internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.12.1"
+WATCHER_VERSION = "0.13.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -55,6 +59,14 @@ ACTIVE_RUN_STATES = ("queued", "running")
 TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
 SUBAGENT_STATES = ("blocked", "idle", "done", "working")
 SUBAGENT_SUMMARY = re.compile(r"^⏳ [1-9][0-9]* subagents?(?: \([^()\n]*\))?$")
+INTERNET_WAIT_ERROR = re.compile(
+    r"(?:\b(?:ENETDOWN|ENETUNREACH|EHOSTDOWN|EHOSTUNREACH|ECONNABORTED|"
+    r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|"
+    r"UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|"
+    r"UND_ERR_SOCKET)\b|kind=upstream-timeout|fetch failed|connection error|"
+    r"network error|socket hang up)",
+    re.IGNORECASE,
+)
 VIEW = {
     "source": SOURCE,
     "label": "Priority+",
@@ -203,6 +215,8 @@ def load_state(path, boot):
                         and not isinstance(record["parallel_wait"], str))
                     or ("waiting" in record and type(record["waiting"]) is not bool)
                     or ("interview" in record and type(record["interview"]) is not bool)
+                    or ("internet_wait" in record
+                        and type(record["internet_wait"]) is not bool)
                     or ("transcript_checked" in record
                         and type(record["transcript_checked"]) is not bool)
                     or record.get("parking") not in (None, "later", "wait")):
@@ -442,6 +456,18 @@ def tail_has_completed_response(payload):
     )
 
 
+def tail_has_internet_wait(payload):
+    """Return whether the active branch ends in a retryable transport failure."""
+    messages, head = session_messages(payload)
+    entry = messages.get(head)
+    message = entry.get("message") if isinstance(entry, dict) else None
+    if (not isinstance(message, dict) or message.get("role") != "assistant"
+            or message.get("stopReason") != "error"):
+        return False
+    error = message.get("errorMessage")
+    return isinstance(error, str) and INTERNET_WAIT_ERROR.search(error) is not None
+
+
 def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
     """Inspect only the active JSONL branch's bounded tail for an unresolved interview call."""
     return inspect_session_tail(path, tail_has_pending_interview, tail_limit, cache)
@@ -450,6 +476,22 @@ def session_has_pending_interview(path, tail_limit=SESSION_TAIL_LIMIT, cache=Non
 def session_has_completed_response(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
     """Return whether the active JSONL branch ends in a visible assistant response."""
     return inspect_session_tail(path, tail_has_completed_response, tail_limit, cache)
+
+
+def session_waits_for_internet(path, tail_limit=SESSION_TAIL_LIMIT, cache=None):
+    """Return whether Pi is retrying after a network failure on the active branch."""
+    return inspect_session_tail(path, tail_has_internet_wait, tail_limit, cache)
+
+
+def internet_wait_sessions(agents):
+    sessions = set()
+    for agent in agents:
+        if agent.get("agent_status") != "working":
+            continue
+        session = pi_session_path(agent)
+        if session and session_waits_for_internet(session):
+            sessions.add(session)
+    return sessions
 
 
 def pending_interview_sessions(agents):
@@ -463,7 +505,8 @@ def pending_interview_sessions(agents):
     return sessions
 
 
-def tracked_pending_interview_sessions(directory, socket_path, cache=None):
+def tracked_session_projection(directory, socket_path, detector, cache=None):
+    """Apply a transcript detector to persisted working Pi session identities."""
     path = instance_folder(directory, socket_path) / "state.json"
     try:
         records = json.loads(path.read_text()).get("agents", {}).values()
@@ -480,12 +523,22 @@ def tracked_pending_interview_sessions(directory, socket_path, cache=None):
                 or not isinstance(identity[4], str) or not os.path.isabs(identity[4])):
             continue
         tracked_paths.add(identity[4])
-        if session_has_pending_interview(identity[4], cache=cache):
+        if detector(identity[4], cache=cache):
             sessions.add(identity[4])
     if cache is not None:
         for session in set(cache) - tracked_paths:
             cache.pop(session, None)
     return sessions
+
+
+def tracked_pending_interview_sessions(directory, socket_path, cache=None):
+    return tracked_session_projection(
+        directory, socket_path, session_has_pending_interview, cache)
+
+
+def tracked_internet_wait_sessions(directory, socket_path, cache=None):
+    return tracked_session_projection(
+        directory, socket_path, session_waits_for_internet, cache)
 
 
 def parallel_wait_target(agent):
@@ -531,6 +584,13 @@ def needs_reconcile_event(message):
     if interview_visible:
         return (tokens.get(TOKEN) != RANK_INTERVIEW
                 or any(labels.get(status) != INTERVIEW_LABEL for status in SUBAGENT_STATES))
+    internet_visible = (tokens.get(INTERNET_WAIT_TOKEN) == "1"
+                        or any(label == INTERNET_WAIT_LABEL for label in labels.values()))
+    if internet_visible:
+        return (tokens.get(TOKEN) != RANK_INTERNET_WAIT
+                or tokens.get(INTERNET_WAIT_TOKEN) != "1"
+                or any(labels.get(status) != INTERNET_WAIT_LABEL
+                       for status in SUBAGENT_STATES))
     wait_target = parallel_wait_target(pane)
     if wait_target:
         wait_label = parallel_wait_label(wait_target)
@@ -648,7 +708,7 @@ def completion_recoveries(agents, previous):
 
 
 def observe(agent, previous=None, parking=None, active_sessions=None, interview_sessions=None,
-            recovered_completions=None):
+            recovered_completions=None, internet_waits=None):
     # Keep the persisted v1 `waiting` field for backward-compatible state files.
     identity = observation_identity(agent)
     status = agent["agent_status"]
@@ -670,6 +730,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "subagent": has_active_subagents(agent, active_sessions),
             "parallel_wait": parallel_wait_target(agent),
             "interview": session_path in (interview_sessions or ()),
+            "internet_wait": session_path in (internet_waits or ()),
             "transcript_checked": transcript_checked,
             "waiting": parking is not None, "parking": parking,
             "applied": previous.get("applied") if previous else None}
@@ -678,6 +739,8 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
 def rank(record):
     if record.get("interview"):
         return RANK_INTERVIEW
+    if record.get("internet_wait"):
+        return RANK_INTERNET_WAIT
     # Waiting on conflicting peer work or a durable resource-queue predecessor
     # stays below every directly working session.
     if record.get("parallel_wait"):
@@ -734,12 +797,13 @@ def reconcile(client, state, path):
     previous = state["agents"]
     active_sessions = active_subagent_sessions()
     interview_sessions = pending_interview_sessions(agents)
+    internet_waits = internet_wait_sessions(agents)
     recovered_completions = completion_recoveries(agents, previous)
     records = {
         agent["terminal_id"]: observe(
             agent, previous.get(agent["terminal_id"]),
             parking_by_workspace.get(agent.get("workspace_id")), active_sessions,
-            interview_sessions, recovered_completions)
+            interview_sessions, recovered_completions, internet_waits)
         for agent in agents
     }
     # Save observations BEFORE side effects, so a killed hook cannot lose a
@@ -761,6 +825,7 @@ def reconcile(client, state, path):
             TOKEN: desired,
             WORKSPACE_TOKEN: None,
             SESSION_TOKEN: None,
+            INTERNET_WAIT_TOKEN: "1" if record["internet_wait"] else None,
             LEGACY_CONTEXT_SUPPRESSION_TOKEN: None,
         }
         position = workspace_order.get(agent.get("workspace_id"))
@@ -784,6 +849,12 @@ def reconcile(client, state, path):
             if (record["applied"] != label_state
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
+        elif record["internet_wait"]:
+            label_state = INTERNET_WAIT_LABEL
+            labels = agent.get("state_labels") or {}
+            if (record["applied"] != label_state
+                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
+                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         elif record["parallel_wait"]:
             label_state = parallel_wait_label(record["parallel_wait"])
             labels = agent.get("state_labels") or {}
@@ -802,7 +873,8 @@ def reconcile(client, state, path):
             label_state = False
             labels = agent.get("state_labels") or {}
             stale_badge = (labels.get("idle") == LEGACY_PENDING_LABEL
-                           or any(label == INTERVIEW_LABEL for label in labels.values())
+                           or any(label in (INTERVIEW_LABEL, INTERNET_WAIT_LABEL)
+                                  for label in labels.values())
                            or any(isinstance(label, str)
                                   and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
                                   for label in labels.values()))
@@ -899,19 +971,27 @@ def run_watcher(directory, socket_path):
         interview_cache = {}
         interview_projection = tracked_pending_interview_sessions(
             directory, socket_path, interview_cache)
+        internet_cache = {}
+        internet_projection = tracked_internet_wait_sessions(
+            directory, socket_path, internet_cache)
         last_full_reconcile = time.monotonic()
 
         def tick():
-            nonlocal subagent_projection, interview_projection, last_full_reconcile
+            nonlocal subagent_projection, interview_projection, internet_projection
+            nonlocal last_full_reconcile
             current_subagents = active_subagent_sessions()
             current_interviews = tracked_pending_interview_sessions(
                 directory, socket_path, interview_cache)
+            current_internet_waits = tracked_internet_wait_sessions(
+                directory, socket_path, internet_cache)
             now = time.monotonic()
             if (current_subagents != subagent_projection
                     or current_interviews != interview_projection
+                    or current_internet_waits != internet_projection
                     or now - last_full_reconcile >= WATCH_FULL_RECONCILE_SECONDS):
                 subagent_projection = current_subagents
                 interview_projection = current_interviews
+                internet_projection = current_internet_waits
                 last_full_reconcile = now
                 return reconcile_now()
             return True
