@@ -77,6 +77,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
         self.assertEqual(pp.COORDINATOR_WAIT_LABEL, "⏳ Waiting for Coordinator")
+        self.assertEqual(pp.COORDINATOR_MANAGED_WAIT_LABEL, "⏳ Waiting for Managed Sessions")
         self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for Internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
@@ -120,6 +121,20 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(
             pp.rank(pp.observe(agent(
                 "blocked", tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG"}))),
+            pp.RANK_BLOCKED,
+        )
+        managed_wait = pp.observe(agent(
+            "idle", tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1, pB, pH"}))
+        self.assertEqual(managed_wait["coordinator_managed_wait"], "p1, pB, pH")
+        self.assertEqual(pp.rank(managed_wait), pp.RANK_COORDINATOR_MANAGED_WAIT)
+        self.assertEqual(
+            pp.rank(pp.observe(agent(
+                "working", tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1"}))),
+            pp.RANK_WORKING,
+        )
+        self.assertEqual(
+            pp.rank(pp.observe(agent(
+                "blocked", tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1"}))),
             pp.RANK_BLOCKED,
         )
         interview_agent = agent(
@@ -591,6 +606,36 @@ class WatcherTests(unittest.TestCase):
             agent_status="idle",
             tokens={pp.TOKEN: pp.RANK_COORDINATOR_WAIT},
             state_labels={"idle": pp.COORDINATOR_WAIT_LABEL},
+        )
+        self.assertTrue(pp.needs_reconcile_event(removed))
+
+    def test_coordinator_managed_wait_metadata_edges_require_reconciliation(self):
+        active = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1, pB", pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.assertTrue(pp.needs_reconcile_event(active))
+
+        converged = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1, pB",
+                    pp.TOKEN: pp.RANK_COORDINATOR_MANAGED_WAIT},
+            state_labels={state: pp.COORDINATOR_MANAGED_WAIT_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(converged))
+
+        working = self.pane_event(
+            agent_status="working",
+            tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1, pB",
+                    pp.TOKEN: pp.RANK_WORKING},
+        )
+        self.assertFalse(pp.needs_reconcile_event(working))
+
+        removed = self.pane_event(
+            agent_status="idle",
+            tokens={pp.TOKEN: pp.RANK_COORDINATOR_MANAGED_WAIT},
+            state_labels={"idle": pp.COORDINATOR_MANAGED_WAIT_LABEL},
         )
         self.assertTrue(pp.needs_reconcile_event(removed))
 
@@ -1130,6 +1175,38 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
+    def test_coordinator_managed_wait_sits_below_working_and_above_later(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1, pB",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_MANAGED_WAIT)
+        self.assertLess(pp.RANK_COORDINATOR_MANAGED_WAIT, pp.RANK_WORKING)
+        self.assertGreater(pp.RANK_COORDINATOR_MANAGED_WAIT, pp.RANK_LATER)
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_MANAGED_WAIT_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(
+            self.state["agents"]["term-1"]["coordinator_managed_wait"], "p1, pB")
+
+        current["agent_status"] = "working"
+        current["state_change_seq"] = 2
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn("state_labels", current)
+
+        current["agent_status"] = "idle"
+        current["state_change_seq"] = 3
+        current["tokens"].pop(pp.COORDINATOR_MANAGED_WAIT_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
+        self.assertNotIn("state_labels", current)
+
     def test_resource_queue_wait_moves_completion_below_reply_required_sessions(self):
         self.client.agents[0] = agent(
             "done", 1,
@@ -1544,7 +1621,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.14.1")
+        self.assertEqual(manifest["version"], "0.15.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

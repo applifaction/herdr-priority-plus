@@ -33,6 +33,8 @@ agents                  Priority+
   ⏳ Warte auf history & release
 ○ Parent idle while a child runs
   ⏳ Subagent working
+○ Coordinator idle while managed sessions run
+  ⏳ Waiting for Managed Sessions
 ○ Ordinary idle
 ○ Inactive in a LATER workspace
 ○ Inactive in a WAIT workspace
@@ -40,7 +42,7 @@ agents                  Priority+
   ⏳ Waiting for Coordinator
 ```
 
-The additional badges read **`⚠ Interview Pending`**, **`⏳ Waiting for Internet`**, **`⏳ Subagent working`**, **`⏳ Warte auf <Tab/Session>`**, and **`⏳ Waiting for Coordinator`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
+The additional badges read **`⚠ Interview Pending`**, **`⏳ Waiting for Internet`**, **`⏳ Subagent working`**, **`⏳ Warte auf <Tab/Session>`**, **`⏳ Waiting for Managed Sessions`**, and **`⏳ Waiting for Coordinator`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
 
 ## What changes
 
@@ -54,6 +56,7 @@ The additional badges read **`⚠ Interview Pending`**, **`⏳ Waiting for Inter
 | 6 | Pi session waiting after a network or Codex tunnel failure | Shows `⏳ Waiting for Internet` and stays below every directly working session. |
 | 6 | Waiting on another Pi session or a durable resource-queue predecessor | Shows `⏳ Warte auf <Tab/Session>` and stays below every directly working session. |
 | 6 | Active pi-subagents child | Shows `⏳ Subagent working` below directly working agents. |
+| 6 | Settled coordinator waiting on managed sessions | Shows `⏳ Waiting for Managed Sessions` below directly working agents and above ordinary idle/LATER sessions. Working or blocked coordinator activity remains visible. |
 | 7 | Ordinary idle | Remains below active work. |
 | 8 | Inactive in `LATER…` | Stays below ordinary idle. |
 | 9 | Inactive in `WAIT…` | Stays below LATER sessions. |
@@ -104,6 +107,7 @@ rows = [
     { equals = "⚠ Interview Pending", fg = "#cb4b16", bold = true },
     { equals = "⏳ Waiting for Internet", fg = "#268bd2", bold = true },
     { equals = "⏳ Subagent working", fg = "#268bd2", bold = true },
+    { equals = "⏳ Waiting for Managed Sessions", fg = "#268bd2", bold = true },
     { contains = "⏳ Warte auf ", fg = "#268bd2", bold = true },
     { contains = "", hide = true },
   ] }],
@@ -115,7 +119,7 @@ The first four rules show Priority+'s activity badges; the final rule hides ever
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
+> **Upgrading:** Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -204,6 +208,8 @@ When the Pi Parallel Session Watch extension publishes `parallel_wait_target`, P
 
 A coordinating process can publish the foreign `coordinator_wait_owner` token while deliberately holding a session for a later dependency. Priority+ projects settled targets as `⏳ Waiting for Coordinator` at its lowest rank. It deliberately preserves normal working and blocked ranks so a stale hold cannot hide active work or a real blocker. The coordinator owns clearing the token before it resumes the target; Priority+ never mutates it.
 
+A coordinator can publish the foreign `coordinator_managed_wait` token on its own pane when no user decision is pending and it is waiting for managed sessions. Priority+ projects a settled coordinator as `⏳ Waiting for Managed Sessions` at the common dependency-wait rank: below direct work, above ordinary idle and parked sessions. Working or blocked coordinator activity retains its real rank. Clearing the token restores the underlying lifecycle/completion rank.
+
 When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. If that best-effort metadata is missing, Priority+ falls back to live, same-user pi-subagents status artifacts and matches their parent session path to Herdr's agent-session identity. The original completion state remains intact underneath. Because Herdr deliberately excludes high-volume `pane.updated` events from manifest hooks, startup and low-volume hooks supervise one detached per-server socket watcher. It selects internet-wait, peer-wait, subagent-summary, and legacy-label cleanup edges, polls the leased `pica_fetch_recovery` projection every two seconds, recovers `events_lost`, and reconciles when a relevant projection changes; unrelated pane updates are ignored.
 
 Priority+ joins each agent's `workspace_id` and `tab_id` with Herdr's live workspace and tab lists. Labels beginning with `LATER` or `WAIT` assign distinct inactive ranks: ordinary idle → LATER → WAIT. Every rank uses the visible workspace position as its first secondary key and the case-folded tab label as its next key, so normal and parked sessions sort alphabetically inside the same Space. Blocked, working, and active-subagent behavior remains visible at the normal activity ranks. An active subagent keeps its badge across idle, done, working, and blocked parent states and always uses the common subagent rank. Pending interviews use the highest rank; blocked sessions without active children remain next. Create, rename, drag-and-drop, and reorder hooks only refresh metadata from the authoritative snapshot; they never call a workspace mutation API.
@@ -219,7 +225,7 @@ Transcript inspection is limited to completion recovery, interview detection, an
 - **Space order is user-controlled.** Priority+ mirrors the current visible order inside every Agents tier and never moves Spaces itself. Drag-and-drop changes therefore become the new ordering source immediately, including for LATER, WAIT, and linked-worktree Spaces.
 - **Session-name sorting is case-insensitive, not locale-aware.** Every tier uses Unicode case folding on displayed tab labels within a Space; Space ordering itself is never alphabetical unless the user arranged it that way.
 - **Single-server support.** Combined multi-machine views are unsupported. Simultaneous clients have not been end-to-end validated.
-- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `pica_fetch_recovery`, `parallel_wait_target`, `parallel_wait_resource_ticket`, `parallel_wait_predecessor`, and `coordinator_wait_owner` are intentionally foreign metadata owned by their Pi extensions or coordinator; Priority+ reads but never clears them.
+- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `pica_fetch_recovery`, `parallel_wait_target`, `parallel_wait_resource_ticket`, `parallel_wait_predecessor`, `coordinator_wait_owner`, and `coordinator_managed_wait` are intentionally foreign metadata owned by their Pi extensions or coordinator; Priority+ reads but never clears them.
 - **Views are shared:** enable/startup can replace another plugin's view. Ordinary hooks never reclaim it; clearing affects only Priority+'s view.
 - **Other idle labels may override the badge.** Cleanup removes only this plugin's label contribution and leaves unrelated tokens alone.
 
