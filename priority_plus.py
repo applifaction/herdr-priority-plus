@@ -29,6 +29,7 @@ LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
 PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
 RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
 RESOURCE_WAIT_PREDECESSOR_TOKEN = "parallel_wait_predecessor"
+COORDINATOR_WAIT_OWNER_TOKEN = "coordinator_wait_owner"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, INTERNET_WAIT_TOKEN,
                 LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_INTERVIEW = "8"
@@ -42,13 +43,15 @@ RANK_IDLE = "3"
 RANK_LATER = "2"
 RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
+RANK_COORDINATOR_WAIT = "0"
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
+COORDINATOR_WAIT_LABEL = "⏳ Waiting for Coordinator"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.14.0"
+WATCHER_VERSION = "0.14.1"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -214,6 +217,9 @@ def load_state(path, boot):
                     or ("parallel_wait" in record
                         and record["parallel_wait"] is not None
                         and not isinstance(record["parallel_wait"], str))
+                    or ("coordinator_wait" in record
+                        and record["coordinator_wait"] is not None
+                        and not isinstance(record["coordinator_wait"], str))
                     or ("waiting" in record and type(record["waiting"]) is not bool)
                     or ("interview" in record and type(record["interview"]) is not bool)
                     or ("internet_wait" in record
@@ -580,6 +586,20 @@ def parallel_wait_label(target):
     return (PARALLEL_WAIT_LABEL_PREFIX + target)[:METADATA_TOKEN_CHAR_LIMIT]
 
 
+def coordinator_wait_owner(agent):
+    tokens = agent.get("tokens") or {}
+    owner = tokens.get(COORDINATOR_WAIT_OWNER_TOKEN)
+    if not isinstance(owner, str):
+        return None
+    owner = " ".join(owner.split())
+    return owner[:METADATA_TOKEN_CHAR_LIMIT] or None
+
+
+def coordinator_wait_is_visible(agent):
+    return (coordinator_wait_owner(agent) is not None
+            and agent.get("agent_status") not in ("working", "blocked"))
+
+
 def needs_reconcile_event(message):
     """Select metadata-only presentation edges omitted from plugin hooks."""
     if not isinstance(message, dict):
@@ -631,6 +651,12 @@ def needs_reconcile_event(message):
                 or any(labels.get(status) != wait_label for status in SUBAGENT_STATES))
     if any(isinstance(label, str) and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
            for label in labels.values()):
+        return True
+    if coordinator_wait_is_visible(pane):
+        return (tokens.get(TOKEN) != RANK_COORDINATOR_WAIT
+                or any(labels.get(status) != COORDINATOR_WAIT_LABEL
+                       for status in SUBAGENT_STATES))
+    if any(label == COORDINATOR_WAIT_LABEL for label in labels.values()):
         return True
     if has_active_subagents(pane):
         return (tokens.get(TOKEN) != RANK_SUBAGENT
@@ -763,6 +789,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
             "subagent": has_active_subagents(agent, active_sessions),
             "parallel_wait": parallel_wait_target(agent),
+            "coordinator_wait": coordinator_wait_owner(agent),
             "interview": session_path in (interview_sessions or ()),
             "internet_wait": (internet_recovery
                               or session_path in (internet_waits or ())),
@@ -787,6 +814,10 @@ def rank(record):
         return RANK_BLOCKED
     if record["status"] == "working":
         return RANK_WORKING
+    # A coordinator hold hides only settled work. If the target unexpectedly
+    # starts or blocks, surface the real activity instead of masking it.
+    if record.get("coordinator_wait"):
+        return RANK_COORDINATOR_WAIT
     if record.get("parking") == "later":
         return RANK_LATER
     if record.get("parking") == "wait":
@@ -898,6 +929,13 @@ def reconcile(client, state, path):
             if (record["applied"] != label_state
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
+        elif (record["coordinator_wait"]
+              and record["status"] not in ("working", "blocked")):
+            label_state = COORDINATOR_WAIT_LABEL
+            labels = agent.get("state_labels") or {}
+            if (record["applied"] != label_state
+                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
+                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         elif record["subagent"]:
             label_state = SUBAGENT_LABEL
             labels = agent.get("state_labels") or {}
@@ -910,7 +948,8 @@ def reconcile(client, state, path):
             label_state = False
             labels = agent.get("state_labels") or {}
             stale_badge = (labels.get("idle") == LEGACY_PENDING_LABEL
-                           or any(label in (INTERVIEW_LABEL, INTERNET_WAIT_LABEL)
+                           or any(label in (INTERVIEW_LABEL, INTERNET_WAIT_LABEL,
+                                            COORDINATOR_WAIT_LABEL)
                                   for label in labels.values())
                            or any(isinstance(label, str)
                                   and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)

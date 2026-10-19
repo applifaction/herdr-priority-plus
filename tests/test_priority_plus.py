@@ -76,6 +76,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
+        self.assertEqual(pp.COORDINATOR_WAIT_LABEL, "⏳ Waiting for Coordinator")
         self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for Internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
@@ -107,6 +108,20 @@ class LifecycleTests(unittest.TestCase):
             "done", tokens={pp.RESOURCE_WAIT_PREDECESSOR_TOKEN: "image 3"}))
         self.assertIsNone(incomplete_resource_wait["parallel_wait"])
         self.assertEqual(pp.rank(incomplete_resource_wait), pp.RANK_PENDING)
+        coordinator_wait = pp.observe(agent(
+            "idle", tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG"}))
+        self.assertEqual(coordinator_wait["coordinator_wait"], "w61:pG")
+        self.assertEqual(pp.rank(coordinator_wait), pp.RANK_COORDINATOR_WAIT)
+        self.assertEqual(
+            pp.rank(pp.observe(agent(
+                "working", tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG"}))),
+            pp.RANK_WORKING,
+        )
+        self.assertEqual(
+            pp.rank(pp.observe(agent(
+                "blocked", tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG"}))),
+            pp.RANK_BLOCKED,
+        )
         interview_agent = agent(
             "working", agent_session={"source": "herdr:pi", "agent": "pi",
                                         "kind": "path", "value": "/sessions/interview.jsonl"})
@@ -549,6 +564,35 @@ class WatcherTests(unittest.TestCase):
         cleared_recovery_lease = copy.deepcopy(converged_recovery)
         cleared_recovery_lease["data"]["pane"]["tokens"].pop(pp.FETCH_RECOVERY_TOKEN)
         self.assertTrue(pp.needs_reconcile_event(cleared_recovery_lease))
+
+    def test_coordinator_wait_metadata_edges_require_reconciliation(self):
+        active = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG", pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.assertTrue(pp.needs_reconcile_event(active))
+
+        converged = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_COORDINATOR_WAIT},
+            state_labels={state: pp.COORDINATOR_WAIT_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(converged))
+
+        working = self.pane_event(
+            agent_status="working",
+            tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG", pp.TOKEN: pp.RANK_WORKING},
+        )
+        self.assertFalse(pp.needs_reconcile_event(working))
+
+        removed = self.pane_event(
+            agent_status="idle",
+            tokens={pp.TOKEN: pp.RANK_COORDINATOR_WAIT},
+            state_labels={"idle": pp.COORDINATOR_WAIT_LABEL},
+        )
+        self.assertTrue(pp.needs_reconcile_event(removed))
 
     def test_parallel_wait_metadata_edges_require_reconciliation(self):
         wait_label = pp.parallel_wait_label("history & release")
@@ -1056,6 +1100,36 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_IDLE)
         self.assertNotIn("state_labels", current)
 
+    def test_coordinator_wait_demotes_only_settled_session_and_cleans_up(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_WAIT)
+        self.assertEqual(current["tokens"][pp.COORDINATOR_WAIT_OWNER_TOKEN], "w61:pG")
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_WAIT_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(self.state["agents"]["term-1"]["coordinator_wait"], "w61:pG")
+
+        current["agent_status"] = "working"
+        current["state_change_seq"] = 2
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn("state_labels", current)
+
+        current["agent_status"] = "idle"
+        current["state_change_seq"] = 3
+        current["tokens"].pop(pp.COORDINATOR_WAIT_OWNER_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
+        self.assertNotIn("state_labels", current)
+
     def test_resource_queue_wait_moves_completion_below_reply_required_sessions(self):
         self.client.agents[0] = agent(
             "done", 1,
@@ -1466,8 +1540,11 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["id"], pp.PLUGIN)
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
-        self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.14.0")
+        self.assertEqual(
+            {a["id"] for a in manifest["actions"]},
+            {"enable", "disable", "toggle", "refresh", "cleanup"},
+        )
+        self.assertEqual(manifest["version"], "0.14.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
