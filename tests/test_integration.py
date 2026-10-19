@@ -33,7 +33,7 @@ class RealHerdrTests(unittest.TestCase):
                               '[ui.sidebar.agents]\nrows = [\n'
                               '  ["state_icon", "agent", "workspace"],\n'
                               '  [{ token = "state_text", rules = [{ equals = "⚠ Interview Pending" }, '
-                              '{ equals = "⏳ Waiting for internet" }, '
+                              '{ equals = "⏳ Waiting for Internet" }, '
                               '{ equals = "⏳ Subagent working" }, { contains = "", hide = true }] }],\n]\n')
             env.update(HERDR_SOCKET_PATH=str(base / "api.sock"),
                        HERDR_CLIENT_SOCKET_PATH=str(base / "client.sock"),

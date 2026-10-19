@@ -24,6 +24,7 @@ TOKEN = "pp_rank"
 WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
 INTERNET_WAIT_TOKEN = "pp_internet_wait"
+FETCH_RECOVERY_TOKEN = "pica_fetch_recovery"
 LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
 PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
 RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
@@ -44,10 +45,10 @@ RANK_UNKNOWN = "0"
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
-INTERNET_WAIT_LABEL = "⏳ Waiting for internet"
+INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.13.0"
+WATCHER_VERSION = "0.14.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -64,7 +65,7 @@ INTERNET_WAIT_ERROR = re.compile(
     r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|"
     r"UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|"
     r"UND_ERR_SOCKET)\b|kind=upstream-timeout|fetch failed|connection error|"
-    r"network error|socket hang up)",
+    r"network error|socket hang up|tunnel[_ -]destination[_ -]denied)",
     re.IGNORECASE,
 )
 VIEW = {
@@ -217,6 +218,8 @@ def load_state(path, boot):
                     or ("interview" in record and type(record["interview"]) is not bool)
                     or ("internet_wait" in record
                         and type(record["internet_wait"]) is not bool)
+                    or ("internet_recovery" in record
+                        and type(record["internet_recovery"]) is not bool)
                     or ("transcript_checked" in record
                         and type(record["transcript_checked"]) is not bool)
                     or record.get("parking") not in (None, "later", "wait")):
@@ -541,6 +544,25 @@ def tracked_internet_wait_sessions(directory, socket_path, cache=None):
         directory, socket_path, session_waits_for_internet, cache)
 
 
+def has_fetch_recovery_wait(agent):
+    """Return whether the Pi recovery extension reports a settled wait."""
+    tokens = agent.get("tokens") or {}
+    value = tokens.get(FETCH_RECOVERY_TOKEN) if isinstance(tokens, dict) else None
+    return isinstance(value, str) and bool(value.strip())
+
+
+def tracked_fetch_recovery_waits(socket_path):
+    """Poll leased recovery metadata because token reports can bypass watcher edges."""
+    try:
+        agents = Client(socket_path).call("agent.list")["agents"]
+        return frozenset(agent["terminal_id"] for agent in agents
+                         if has_fetch_recovery_wait(agent))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        # A transient socket failure must not kill the long-lived watcher. The
+        # next two-second tick retries, while the 30-second sweep remains a guard.
+        return None
+
+
 def parallel_wait_target(agent):
     tokens = agent.get("tokens") or {}
     target = tokens.get(PARALLEL_WAIT_TARGET_TOKEN)
@@ -584,11 +606,22 @@ def needs_reconcile_event(message):
     if interview_visible:
         return (tokens.get(TOKEN) != RANK_INTERVIEW
                 or any(labels.get(status) != INTERVIEW_LABEL for status in SUBAGENT_STATES))
-    internet_visible = (tokens.get(INTERNET_WAIT_TOKEN) == "1"
+    recovery_wait = has_fetch_recovery_wait(pane)
+    internet_marker = tokens.get(INTERNET_WAIT_TOKEN)
+    internet_visible = (recovery_wait
+                        or internet_marker in ("1", "recovery", "transcript")
                         or any(label == INTERNET_WAIT_LABEL for label in labels.values()))
     if internet_visible:
+        if recovery_wait:
+            expected_marker = "recovery"
+        elif internet_marker in ("1", "recovery"):
+            # The foreign lease disappeared. Reconcile immediately instead of
+            # leaving the waiting badge and rank until the 30-second sweep.
+            return True
+        else:
+            expected_marker = "transcript"
         return (tokens.get(TOKEN) != RANK_INTERNET_WAIT
-                or tokens.get(INTERNET_WAIT_TOKEN) != "1"
+                or internet_marker != expected_marker
                 or any(labels.get(status) != INTERNET_WAIT_LABEL
                        for status in SUBAGENT_STATES))
     wait_target = parallel_wait_target(pane)
@@ -726,11 +759,14 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
     # Working/blocked/unknown are not a completed run. Keep the underlying
     # pending flag while a child runs so its completion priority can return afterwards.
     session_path = pi_session_path(agent)
+    internet_recovery = has_fetch_recovery_wait(agent)
     return {"identity": identity, "status": status, "seq": seq, "pending": pending,
             "subagent": has_active_subagents(agent, active_sessions),
             "parallel_wait": parallel_wait_target(agent),
             "interview": session_path in (interview_sessions or ()),
-            "internet_wait": session_path in (internet_waits or ()),
+            "internet_wait": (internet_recovery
+                              or session_path in (internet_waits or ())),
+            "internet_recovery": internet_recovery,
             "transcript_checked": transcript_checked,
             "waiting": parking is not None, "parking": parking,
             "applied": previous.get("applied") if previous else None}
@@ -825,7 +861,8 @@ def reconcile(client, state, path):
             TOKEN: desired,
             WORKSPACE_TOKEN: None,
             SESSION_TOKEN: None,
-            INTERNET_WAIT_TOKEN: "1" if record["internet_wait"] else None,
+            INTERNET_WAIT_TOKEN: ("recovery" if record["internet_recovery"]
+                                  else "transcript" if record["internet_wait"] else None),
             LEGACY_CONTEXT_SUPPRESSION_TOKEN: None,
         }
         position = workspace_order.get(agent.get("workspace_id"))
@@ -974,24 +1011,31 @@ def run_watcher(directory, socket_path):
         internet_cache = {}
         internet_projection = tracked_internet_wait_sessions(
             directory, socket_path, internet_cache)
+        recovery_projection = tracked_fetch_recovery_waits(socket_path)
         last_full_reconcile = time.monotonic()
 
         def tick():
             nonlocal subagent_projection, interview_projection, internet_projection
-            nonlocal last_full_reconcile
+            nonlocal recovery_projection, last_full_reconcile
             current_subagents = active_subagent_sessions()
             current_interviews = tracked_pending_interview_sessions(
                 directory, socket_path, interview_cache)
             current_internet_waits = tracked_internet_wait_sessions(
                 directory, socket_path, internet_cache)
+            current_recovery_waits = tracked_fetch_recovery_waits(socket_path)
+            recovery_changed = (current_recovery_waits is not None
+                                and current_recovery_waits != recovery_projection)
             now = time.monotonic()
             if (current_subagents != subagent_projection
                     or current_interviews != interview_projection
                     or current_internet_waits != internet_projection
+                    or recovery_changed
                     or now - last_full_reconcile >= WATCH_FULL_RECONCILE_SECONDS):
                 subagent_projection = current_subagents
                 interview_projection = current_interviews
                 internet_projection = current_internet_waits
+                if current_recovery_waits is not None:
+                    recovery_projection = current_recovery_waits
                 last_full_reconcile = now
                 return reconcile_now()
             return True

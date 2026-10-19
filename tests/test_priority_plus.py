@@ -76,7 +76,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
         self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
-        self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for internet")
+        self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for Internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
     def test_bootstrap_and_all_ranks(self):
@@ -118,6 +118,10 @@ class LifecycleTests(unittest.TestCase):
             interview_agent, internet_waits={"/sessions/interview.jsonl"})
         self.assertTrue(internet["internet_wait"])
         self.assertEqual(pp.rank(internet), pp.RANK_INTERNET_WAIT)
+        external_internet = pp.observe(agent(
+            "idle", tokens={pp.FETCH_RECOVERY_TOKEN: "⏳ Waiting for Internet"}))
+        self.assertTrue(external_internet["internet_wait"])
+        self.assertEqual(pp.rank(external_internet), pp.RANK_INTERNET_WAIT)
         self.assertLess(pp.RANK_INTERNET_WAIT, pp.RANK_WORKING)
 
     def test_transitions_and_review(self):
@@ -384,6 +388,10 @@ class InterviewDetectionTests(unittest.TestCase):
             self.write_entries(path, failed, context_edit)
             self.assertTrue(pp.session_waits_for_internet(path))
             self.assertEqual(pp.internet_wait_sessions([self.pi_agent(path)]), {str(path)})
+
+            self.write_entries(path, self.assistant_error(
+                error_message="Codex error: tunnel_destination_denied"))
+            self.assertTrue(pp.session_waits_for_internet(path))
             self.assertEqual(pp.internet_wait_sessions([self.pi_agent(path, "idle")]), set())
 
             self.write_entries(path, self.assistant_error(
@@ -457,6 +465,16 @@ class InterviewDetectionTests(unittest.TestCase):
 
 
 class WatcherTests(unittest.TestCase):
+    def test_fetch_recovery_projection_tracks_foreign_leases(self):
+        fake = FakeClient([agent(
+            "idle", tokens={pp.FETCH_RECOVERY_TOKEN: "⏳ Waiting for Internet"})])
+        with patch.object(pp, "Client", return_value=fake):
+            self.assertEqual(pp.tracked_fetch_recovery_waits("/tmp/herdr.sock"),
+                             frozenset({"term-1"}))
+            fake.agents[0]["tokens"].pop(pp.FETCH_RECOVERY_TOKEN)
+            self.assertEqual(pp.tracked_fetch_recovery_waits("/tmp/herdr.sock"),
+                             frozenset())
+
     def pane_event(self, **pane):
         return {"event": "pane_updated", "data": {"type": "pane_updated", "pane": pane}}
 
@@ -496,7 +514,8 @@ class WatcherTests(unittest.TestCase):
     def test_internet_wait_badge_edges_require_reconciliation(self):
         active = self.pane_event(
             pane_id="w1:p1",
-            tokens={pp.TOKEN: pp.RANK_INTERNET_WAIT, pp.INTERNET_WAIT_TOKEN: "1"},
+            tokens={pp.TOKEN: pp.RANK_INTERNET_WAIT,
+                    pp.INTERNET_WAIT_TOKEN: "transcript"},
             state_labels={state: pp.INTERNET_WAIT_LABEL for state in pp.SUBAGENT_STATES},
         )
         self.assertFalse(pp.needs_reconcile_event(active))
@@ -510,6 +529,26 @@ class WatcherTests(unittest.TestCase):
             state_labels={"working": pp.INTERNET_WAIT_LABEL},
         )
         self.assertTrue(pp.needs_reconcile_event(stale))
+
+        external = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.FETCH_RECOVERY_TOKEN: "⏳ Waiting for Internet",
+                    pp.TOKEN: pp.RANK_PENDING},
+        )
+        self.assertTrue(pp.needs_reconcile_event(external))
+
+        converged_recovery = self.pane_event(
+            pane_id="w1:p1",
+            tokens={pp.FETCH_RECOVERY_TOKEN: "⏳ Waiting for Internet",
+                    pp.TOKEN: pp.RANK_INTERNET_WAIT,
+                    pp.INTERNET_WAIT_TOKEN: "recovery"},
+            state_labels={state: pp.INTERNET_WAIT_LABEL for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(converged_recovery))
+
+        cleared_recovery_lease = copy.deepcopy(converged_recovery)
+        cleared_recovery_lease["data"]["pane"]["tokens"].pop(pp.FETCH_RECOVERY_TOKEN)
+        self.assertTrue(pp.needs_reconcile_event(cleared_recovery_lease))
 
     def test_parallel_wait_metadata_edges_require_reconciliation(self):
         wait_label = pp.parallel_wait_label("history & release")
@@ -915,11 +954,12 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         current = self.client.agents[0]
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_INTERNET_WAIT)
-        self.assertEqual(current["tokens"][pp.INTERNET_WAIT_TOKEN], "1")
+        self.assertEqual(current["tokens"][pp.INTERNET_WAIT_TOKEN], "transcript")
         self.assertEqual(current["state_labels"], {
             state: pp.INTERNET_WAIT_LABEL for state in pp.SUBAGENT_STATES
         })
         self.assertTrue(self.state["agents"]["term-1"]["internet_wait"])
+        self.assertFalse(self.state["agents"]["term-1"]["internet_recovery"])
 
         with session.open("a") as stream:
             stream.write(json.dumps({
@@ -932,6 +972,31 @@ class ReconciliationTests(unittest.TestCase):
         self.assertNotIn(pp.INTERNET_WAIT_TOKEN, current["tokens"])
         self.assertNotIn("state_labels", current)
         self.assertFalse(self.state["agents"]["term-1"]["internet_wait"])
+
+    def test_idle_fetch_recovery_metadata_joins_internet_wait_tier(self):
+        self.client.agents[0] = agent(
+            "idle", tokens={pp.FETCH_RECOVERY_TOKEN: "⏳ Waiting for Internet"})
+
+        self.sync()
+
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_INTERNET_WAIT)
+        self.assertEqual(current["tokens"][pp.INTERNET_WAIT_TOKEN], "recovery")
+        self.assertEqual(current["tokens"][pp.FETCH_RECOVERY_TOKEN],
+                         "⏳ Waiting for Internet")
+        self.assertEqual(current["state_labels"], {
+            state: pp.INTERNET_WAIT_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertTrue(self.state["agents"]["term-1"]["internet_wait"])
+        self.assertTrue(self.state["agents"]["term-1"]["internet_recovery"])
+
+        current["tokens"].pop(pp.FETCH_RECOVERY_TOKEN)
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_IDLE)
+        self.assertNotIn(pp.INTERNET_WAIT_TOKEN, current["tokens"])
+        self.assertNotIn("state_labels", current)
+        self.assertFalse(self.state["agents"]["term-1"]["internet_wait"])
+        self.assertFalse(self.state["agents"]["term-1"]["internet_recovery"])
 
     def test_active_subagent_ranks_below_working_and_reasserts_its_label(self):
         completed = pp.observe(agent("done", 1))
@@ -1402,7 +1467,7 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["startup"][0]["command"], ["python3", "priority_plus.py", "startup"])
         self.assertEqual({a["id"] for a in manifest["actions"]}, {"enable", "disable", "toggle", "cleanup"})
-        self.assertEqual(manifest["version"], "0.13.0")
+        self.assertEqual(manifest["version"], "0.14.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

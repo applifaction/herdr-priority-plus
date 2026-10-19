@@ -28,7 +28,7 @@ agents                  Priority+
 ○ Reviewed result, still prioritized
 ◐ Working
 ◐ Retrying after a network failure
-  ⏳ Waiting for internet
+  ⏳ Waiting for Internet
 ○ Waiting for another Pi session
   ⏳ Warte auf history & release
 ○ Parent idle while a child runs
@@ -38,7 +38,7 @@ agents                  Priority+
 ○ Inactive in a WAIT workspace
 ```
 
-The additional badges read **`⚠ Interview Pending`**, **`⏳ Waiting for internet`**, **`⏳ Subagent working`**, and **`⏳ Warte auf <Tab/Session>`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
+The additional badges read **`⚠ Interview Pending`**, **`⏳ Waiting for Internet`**, **`⏳ Subagent working`**, and **`⏳ Warte auf <Tab/Session>`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
 
 ## What changes
 
@@ -49,7 +49,7 @@ The additional badges read **`⚠ Interview Pending`**, **`⏳ Waiting for inter
 | 3 | Completed, not viewed outside `LATER…`/`WAIT…` | Keeps Herdr's native done indicator near the top and groups it by Spaces order. |
 | 4 | Completed, viewed, no new run | Stays above ordinary working agents without an extra badge and groups it by Spaces order. |
 | 5 | Working | Clears the previous completion marker. |
-| 6 | Working Pi session retrying after a network failure | Shows `⏳ Waiting for internet` and stays below every directly working session. |
+| 6 | Pi session waiting after a network or Codex tunnel failure | Shows `⏳ Waiting for Internet` and stays below every directly working session. |
 | 6 | Waiting on another Pi session or a durable resource-queue predecessor | Shows `⏳ Warte auf <Tab/Session>` and stays below every directly working session. |
 | 6 | Active pi-subagents child | Shows `⏳ Subagent working` below directly working agents. |
 | 7 | Ordinary idle | Remains below active work. |
@@ -99,7 +99,7 @@ rows = [
   ["state_icon", "machine", "workspace", "tab"],
   [{ token = "state_text", rules = [
     { equals = "⚠ Interview Pending", fg = "#cb4b16", bold = true },
-    { equals = "⏳ Waiting for internet", fg = "#268bd2", bold = true },
+    { equals = "⏳ Waiting for Internet", fg = "#268bd2", bold = true },
     { equals = "⏳ Subagent working", fg = "#268bd2", bold = true },
     { contains = "⏳ Warte auf ", fg = "#268bd2", bold = true },
     { contains = "", hide = true },
@@ -112,7 +112,7 @@ The first four rules show Priority+'s activity badges; the final rule hides ever
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** Version 0.13.0 adds the `⏳ Waiting for internet` badge and places network-retrying sessions below directly working sessions. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
+> **Upgrading:** Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -189,15 +189,15 @@ On the first compatible observation of an idle Pi session, Priority+ checks whet
 
 While a Pi agent remains `working`, Priority+ checks the bounded tail of its reported JSONL session path for an unresolved `interview` tool call on the active branch. That pane moves above blocked sessions and shows `⚠ Interview Pending`. The watcher notices both the call and its matching tool result without waiting for a lifecycle transition; after the result arrives, the ordinary working rank and label return.
 
-The same bounded active-branch projection recognizes transport failures such as `ENETUNREACH`, `ETIMEDOUT`, DNS failures, and fetch/connection errors while Pi remains `working` and retries. The pane moves below directly working sessions and shows `⏳ Waiting for internet`; the watcher restores the normal working rank as soon as a later message advances the branch.
+The same bounded active-branch projection recognizes transport failures such as `ENETUNREACH`, `ETIMEDOUT`, DNS failures, fetch/connection errors, and Codex `tunnel_destination_denied` while Pi remains `working` and retries. After Pi settles, the Fetch Recovery extension's leased `pica_fetch_recovery` token keeps the idle pane in that same tier while it waits to continue automatically. In both phases the pane stays below directly working sessions and shows `⏳ Waiting for Internet`; later transcript progress or removal of the recovery token restores its underlying rank.
 
 When the Pi Parallel Session Watch extension publishes `parallel_wait_target`, Priority+ places that pane below every directly working session and shows `⏳ Warte auf <target>`. Durable resource-queue waits receive the same treatment when the extension publishes both `parallel_wait_resource_ticket` and `parallel_wait_predecessor`. This keeps a settled Pi turn that is still waiting out of both the higher reply-required completion tier and the directly working tier. The extension retains ownership of all wait tokens; Priority+ only projects them. Removing the relevant tokens restores the underlying lifecycle/completion rank and clears the dynamic label.
 
-When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. If that best-effort metadata is missing, Priority+ falls back to live, same-user pi-subagents status artifacts and matches their parent session path to Herdr's agent-session identity. The original completion state remains intact underneath. Because Herdr deliberately excludes high-volume `pane.updated` events from manifest hooks, startup and low-volume hooks supervise one detached per-server socket watcher. It selects internet-wait, peer-wait, subagent-summary, and legacy-label cleanup edges, recovers `events_lost`, and reconciles when the active-session projection changes; unrelated pane updates are ignored.
+When [pi-subagents](https://github.com/nicobailon/pi-subagents) publishes its `summary` token, Priority+ gives that pane a stable `⏳ Subagent working` label and places it below directly working agents. If that best-effort metadata is missing, Priority+ falls back to live, same-user pi-subagents status artifacts and matches their parent session path to Herdr's agent-session identity. The original completion state remains intact underneath. Because Herdr deliberately excludes high-volume `pane.updated` events from manifest hooks, startup and low-volume hooks supervise one detached per-server socket watcher. It selects internet-wait, peer-wait, subagent-summary, and legacy-label cleanup edges, polls the leased `pica_fetch_recovery` projection every two seconds, recovers `events_lost`, and reconciles when a relevant projection changes; unrelated pane updates are ignored.
 
 Priority+ joins each agent's `workspace_id` and `tab_id` with Herdr's live workspace and tab lists. Labels beginning with `LATER` or `WAIT` assign distinct inactive ranks: ordinary idle → LATER → WAIT. Every rank uses the visible workspace position as its first secondary key and the case-folded tab label as its next key, so normal and parked sessions sort alphabetically inside the same Space. Blocked, working, and active-subagent behavior remains visible at the normal activity ranks. An active subagent keeps its badge across idle, done, working, and blocked parent states and always uses the common subagent rank. Pending interviews use the highest rank; blocked sessions without active children remain next. Create, rename, drag-and-drop, and reorder hooks only refresh metadata from the authoritative snapshot; they never call a workspace mutation API.
 
-Transcript inspection is limited to completion recovery and interview detection: it reads at most the last 1 MiB of same-user, regular Pi JSONL session files reported by Herdr, uses only message roles and structural content types from the active branch/head, caches or persists completed projections, and records no message content. All other behavior remains lifecycle/metadata based. The watcher primarily uses Herdr's event stream and performs a bounded two-second heartbeat, with a full reconciliation at most every 30 seconds when nothing changes. It exits when the server socket closes; `cleanup` stops it explicitly. Per-socket locks and atomic private files serialize updates. Requests have bounded timeouts and verify the server's process identity. Subagent status artifacts must be regular same-user files, stay below 1 MiB, name a live parent PID, and report a queued/running state. The plugin never submits prompts, changes focus, renames sessions, or fabricates native agent states. Stored metadata may include session IDs or paths.
+Transcript inspection is limited to completion recovery, interview detection, and active transport/tunnel-failure detection: it reads at most the last 1 MiB of same-user, regular Pi JSONL session files reported by Herdr, uses only message roles and structural content types from the active branch/head, caches or persists completed projections, and records no message content. All other behavior remains lifecycle/metadata based. The watcher primarily uses Herdr's event stream and performs a bounded two-second heartbeat, with a full reconciliation at most every 30 seconds when nothing changes. It exits when the server socket closes; `cleanup` stops it explicitly. Per-socket locks and atomic private files serialize updates. Requests have bounded timeouts and verify the server's process identity. Subagent status artifacts must be regular same-user files, stay below 1 MiB, name a live parent PID, and report a queued/running state. The plugin never submits prompts, changes focus, renames sessions, or fabricates native agent states. Stored metadata may include session IDs or paths.
 
 ### Limits and coexistence
 
@@ -208,7 +208,7 @@ Transcript inspection is limited to completion recovery and interview detection:
 - **Space order is user-controlled.** Priority+ mirrors the current visible order inside every Agents tier and never moves Spaces itself. Drag-and-drop changes therefore become the new ordering source immediately, including for LATER, WAIT, and linked-worktree Spaces.
 - **Session-name sorting is case-insensitive, not locale-aware.** Every tier uses Unicode case folding on displayed tab labels within a Space; Space ordering itself is never alphabetical unless the user arranged it that way.
 - **Single-server support.** Combined multi-machine views are unsupported. Simultaneous clients have not been end-to-end validated.
-- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `parallel_wait_target`, `parallel_wait_resource_ticket`, and `parallel_wait_predecessor` are intentionally foreign metadata owned by the Pi watcher extension; Priority+ reads but never clears them.
+- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, or `pp_session_sort`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `pica_fetch_recovery`, `parallel_wait_target`, `parallel_wait_resource_ticket`, and `parallel_wait_predecessor` are intentionally foreign metadata owned by their Pi extensions; Priority+ reads but never clears them.
 - **Views are shared:** enable/startup can replace another plugin's view. Ordinary hooks never reclaim it; clearing affects only Priority+'s view.
 - **Other idle labels may override the badge.** Cleanup removes only this plugin's label contribution and leaves unrelated tokens alone.
 
