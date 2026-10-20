@@ -42,7 +42,14 @@ status_indicators = "symbols"
 [ui.sound]
 enabled = false
 [ui.sidebar.agents]
-rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠ Interview Pending", fg = "#cb4b16", bold = true }, { equals = "⏳ Waiting for Internet", fg = "#268bd2", bold = true }, { equals = "⏳ Subagent working", fg = "#268bd2", bold = true }, { contains = "", hide = true }] }]]
+rows = [
+  ["state_icon", { token = "$pp_reply_display", fg = "#000000", bold = true }, "$pp_agent_display"],
+  [{ token = "$pp_status_display", rules = [
+    { contains = "Waiting for User Review", fg = "#000000", bold = true },
+    { contains = "Interview Pending", fg = "#cb4b16", bold = true },
+    { contains = "", fg = "#268bd2", bold = false },
+  ] }],
+]
 ''')
 
     def rpc(method, params=None):
@@ -106,13 +113,22 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
         print(label + '\n' + '\n'.join(line for line in lines if line.strip()))
         return lines
 
+    def rendered_cells(needle):
+        for row, line in enumerate(screen.display):
+            if needle in line:
+                start = line.index(needle)
+                return [screen.buffer[row][column] for column in range(start, start + len(needle))]
+        raise AssertionError(f'missing rendered text: {needle}')
+
     def fixture_order(lines):
-        names = [
-            'BLOCKED', 'UNREAD', 'REVIEWED', 'RUNNING', 'SUBAGENT', 'IDLE',
-            'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
-            'WAIT_ALPHA_A', 'WAIT_ALPHA_Z', 'WAITING',
+        markers = [
+            ('BLOCKED', 'BLOCKED'), ('UNREAD', 'UNREAD'), ('REVIEWED', 'REVIEWED'),
+            ('RUNNING', 'RUNNING'), ('SUBAGENT', 'SUBAGENT'), ('IDLE', 'IDLE'),
+            ('LATER_ALPHA_A', 'LA_A'), ('LATER_ALPHA_Z', 'LA_Z'),
+            ('DEFERRED', 'DEFERRED'), ('WAIT_ALPHA_A', 'WA_A'),
+            ('WAIT_ALPHA_Z', 'WA_Z'), ('WAITING', 'WAITING'),
         ]
-        return [name for line in lines for name in names if name in line]
+        return [name for line in lines for name, marker in markers if marker in line]
 
     def report(pane, state):
         return rpc('pane.report_agent', {'pane_id': pane, 'source': 'test:priority-plus', 'agent': 'pi', 'state': state})
@@ -178,9 +194,9 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
             report(panes['DEFERRED'], 'idle')
             later_alpha = rpc('workspace.create', {'cwd': temp, 'label': 'LATER/ALPHA', 'focus': False})
             panes['LATER_ALPHA_Z'] = later_alpha['root_pane']['pane_id']
-            rpc('tab.rename', {'tab_id': later_alpha['root_pane']['tab_id'], 'label': 'LATER_ALPHA_Z'})
+            rpc('tab.rename', {'tab_id': later_alpha['root_pane']['tab_id'], 'label': 'LA_Z'})
             later_alpha_a = rpc('tab.create', {
-                'workspace_id': later_alpha['workspace']['workspace_id'], 'label': 'LATER_ALPHA_A',
+                'workspace_id': later_alpha['workspace']['workspace_id'], 'label': 'LA_A',
                 'cwd': temp, 'focus': False,
             })
             panes['LATER_ALPHA_A'] = later_alpha_a['root_pane']['pane_id']
@@ -188,9 +204,9 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
             report(panes['LATER_ALPHA_A'], 'idle')
             wait_alpha = rpc('workspace.create', {'cwd': temp, 'label': 'WAIT/ALPHA', 'focus': False})
             panes['WAIT_ALPHA_Z'] = wait_alpha['root_pane']['pane_id']
-            rpc('tab.rename', {'tab_id': wait_alpha['root_pane']['tab_id'], 'label': 'WAIT_ALPHA_Z'})
+            rpc('tab.rename', {'tab_id': wait_alpha['root_pane']['tab_id'], 'label': 'WA_Z'})
             wait_alpha_a = rpc('tab.create', {
-                'workspace_id': wait_alpha['workspace']['workspace_id'], 'label': 'WAIT_ALPHA_A',
+                'workspace_id': wait_alpha['workspace']['workspace_id'], 'label': 'WA_A',
                 'cwd': temp, 'focus': False,
             })
             panes['WAIT_ALPHA_A'] = wait_alpha_a['root_pane']['pane_id']
@@ -265,13 +281,29 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
                 }
                 for name, rank in ranks.items():
                     position = workspace_positions.get(name, 1)
+                    workspace_name = {
+                        'UNREAD': 'action-lower',
+                        'DEFERRED': 'LATER/FIXTURE',
+                        'LATER_ALPHA_A': 'LATER/ALPHA',
+                        'LATER_ALPHA_Z': 'LATER/ALPHA',
+                        'WAIT_ALPHA_A': 'WAIT/ALPHA',
+                        'WAIT_ALPHA_Z': 'WAIT/ALPHA',
+                        'WAITING': 'WAIT/FIXTURE',
+                    }.get(name, 'fixture')
+                    tab_name = {
+                        'LATER_ALPHA_A': 'LA_A', 'LATER_ALPHA_Z': 'LA_Z',
+                        'WAIT_ALPHA_A': 'WA_A', 'WAIT_ALPHA_Z': 'WA_Z',
+                    }.get(name, name)
+                    display = f'{workspace_name} {tab_name}'
                     tokens = {
                         'pp_rank': rank,
                         'pp_workspace_sort': f'{position:020d}',
                         'pp_session_sort': name.casefold(),
+                        ('pp_reply_display' if rank > '5' else 'pp_agent_display'): display,
                     }
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': tokens}
                     if name == 'SUBAGENT':
+                        tokens['pp_status_display'] = '↳ ⏳ Subagent working'
                         params['state_labels'] = {'idle': '⏳ Subagent working'}
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
@@ -284,12 +316,20 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
             assert order[:5] == expected_prefix, order
             assert order[5:] == expected_suffix, order
             assert not any('Awaiting reply' in line for line in lines)
-            assert sum('⏳ Subagent working' in line for line in lines) == 1
-            for parked_name in (
-                'LATER_ALPHA_A', 'LATER_ALPHA_Z', 'DEFERRED',
-                'WAIT_ALPHA_A', 'WAIT_ALPHA_Z', 'WAITING',
+            assert sum('↳ ⏳ Subagent working' in line for line in lines) == 1
+            assert not any(' · ' in line and any(name in line for name in panes) for line in lines)
+            reply_cells = rendered_cells('fixture BLOCKED')
+            assert all(cell.bold for cell in reply_cells), 'Reply-required name must be bold'
+            assert all(cell.fg == '000000' for cell in reply_cells), 'Reply-required name must be black'
+            wait_cells = rendered_cells('↳ ⏳ Subagent working')
+            assert not any(cell.bold for cell in wait_cells), 'Operational wait must not be bold'
+            assert all(cell.fg == '268bd2' for cell in wait_cells), 'Operational wait must be blue'
+            for parked_name, marker in (
+                ('LATER_ALPHA_A', 'LA_A'), ('LATER_ALPHA_Z', 'LA_Z'),
+                ('DEFERRED', 'DEFERRED'), ('WAIT_ALPHA_A', 'WA_A'),
+                ('WAIT_ALPHA_Z', 'WA_Z'), ('WAITING', 'WAITING'),
             ):
-                parked_row = next(i for i, line in enumerate(lines) if parked_name in line)
+                parked_row = next(i for i, line in enumerate(lines) if marker in line)
                 assert parked_row + 1 >= len(lines) or 'Awaiting reply' not in lines[parked_row + 1]
             row = next(i+1 for i, line in enumerate(lines) if 'REVIEWED' in line)
             col = lines[row-1].index('REVIEWED')+2
@@ -304,7 +344,7 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
             assert not any('Awaiting reply' in line for line in lines)
             report(panes['REVIEWED'], 'working')
             if not args.plugin:
-                rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '5'}})
+                rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '5', 'pp_reply_display': None, 'pp_agent_display': 'fixture REVIEWED'}})
             lines = capture('next_working_run')
             assert not any('Awaiting reply' in line for line in lines)
             assert fixture_order(lines)[0:2] == ['BLOCKED', 'UNREAD']
@@ -316,6 +356,7 @@ rows = [["state_icon", "tab"], [{ token = "state_text", rules = [{ equals = "⚠
                 lines = capture('priority_plus_enabled')
                 assert any('Priority+' in line for line in lines)
             assert b'38;2;38;139;210' in raw, 'Subagent status must render in configured blue'
+            assert b'38;2;0;0;0' in raw, 'Reply-required names must render in configured black'
             results['passed'] = True
     finally:
         # ONLY the server spawned with our isolated environment is stopped.

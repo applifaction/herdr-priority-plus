@@ -23,6 +23,9 @@ SOURCE = "plugin:" + PLUGIN
 TOKEN = "pp_rank"
 WORKSPACE_TOKEN = "pp_workspace_sort"
 SESSION_TOKEN = "pp_session_sort"
+AGENT_DISPLAY_TOKEN = "pp_agent_display"
+REPLY_DISPLAY_TOKEN = "pp_reply_display"
+STATUS_DISPLAY_TOKEN = "pp_status_display"
 INTERNET_WAIT_TOKEN = "pp_internet_wait"
 FETCH_RECOVERY_TOKEN = "pica_fetch_recovery"
 LEGACY_CONTEXT_SUPPRESSION_TOKEN = "pp_context_suppressed"
@@ -33,7 +36,8 @@ COORDINATOR_WAIT_OWNER_TOKEN = "coordinator_wait_owner"
 COORDINATOR_MANAGED_WAIT_TOKEN = "coordinator_managed_wait"
 COORDINATOR_MANAGED_WAIT_TARGET_PREFIX = "target:"
 COORDINATOR_USER_REVIEW_TOKEN = "coordinator_user_review"
-OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, INTERNET_WAIT_TOKEN,
+OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, AGENT_DISPLAY_TOKEN,
+                REPLY_DISPLAY_TOKEN, STATUS_DISPLAY_TOKEN, INTERNET_WAIT_TOKEN,
                 LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_USER_REVIEW = "9"
 RANK_INTERVIEW = "8"
@@ -59,7 +63,7 @@ COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.17.1"
+WATCHER_VERSION = "0.18.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -67,6 +71,7 @@ SUBAGENT_STATUS_SCAN_LIMIT = 512
 SUBAGENT_STATUS_STALE_SECONDS = 10 * 60
 SESSION_TAIL_LIMIT = 1024 * 1024
 METADATA_TOKEN_CHAR_LIMIT = 80
+DISPLAY_TOKEN_CHAR_LIMIT = 256
 ACTIVE_RUN_STATES = ("queued", "running")
 TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
 SUBAGENT_STATES = ("blocked", "idle", "done", "working")
@@ -866,6 +871,23 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "applied": previous.get("applied") if previous else None}
 
 
+def agent_display_label(workspace_label, tab_label):
+    """Join the Space and tab labels without Herdr's inter-token dot."""
+    parts = [value.strip() for value in (workspace_label, tab_label)
+             if isinstance(value, str) and value.strip()]
+    return " ".join(parts)[:DISPLAY_TOKEN_CHAR_LIMIT]
+
+
+def status_display_label(label):
+    """Indent a supplemental state so it reads as a child of the agent row."""
+    return ("↳ " + label)[:DISPLAY_TOKEN_CHAR_LIMIT]
+
+
+def is_reply_required_rank(value):
+    """Return whether the rank belongs above direct working sessions."""
+    return isinstance(value, str) and value > RANK_WORKING
+
+
 def rank(record):
     if record.get("interview"):
         return RANK_INTERVIEW
@@ -902,6 +924,28 @@ def rank(record):
     if record["pending"]:
         return RANK_PENDING
     return {"idle": RANK_IDLE}.get(record["status"], RANK_UNKNOWN)
+
+
+def presentation_label(record):
+    """Resolve the one supplemental label Priority+ owns for this record."""
+    if record.get("interview"):
+        return INTERVIEW_LABEL
+    if record.get("internet_wait"):
+        return INTERNET_WAIT_LABEL
+    if record.get("parallel_wait"):
+        return parallel_wait_label(record["parallel_wait"])
+    if (record.get("coordinator_wait")
+            and record["status"] not in ("working", "blocked")):
+        return COORDINATOR_WAIT_LABEL
+    if (record.get("coordinator_managed_wait")
+            and record["status"] not in ("working", "blocked")):
+        return coordinator_managed_wait_label(record["coordinator_managed_wait"])
+    if (record.get("coordinator_user_review")
+            and record["status"] not in ("working", "blocked")):
+        return COORDINATOR_USER_REVIEW_LABEL
+    if record.get("subagent"):
+        return SUBAGENT_LABEL
+    return False
 
 
 def metadata(client, pane_id, **fields):
@@ -965,10 +1009,19 @@ def reconcile(client, state, path):
         desired = rank(record)
         fields = {}
         current_tokens = agent.get("tokens", {})
+        session_label = tab_label_by_id.get(agent.get("tab_id"))
+        workspace_label = (workspace_by_id.get(agent.get("workspace_id")) or {}).get("label")
+        display_label = agent_display_label(workspace_label, session_label)
+        label_state = presentation_label(record)
+        reply_required = is_reply_required_rank(desired)
         desired_tokens = {
             TOKEN: desired,
             WORKSPACE_TOKEN: None,
             SESSION_TOKEN: None,
+            AGENT_DISPLAY_TOKEN: display_label if display_label and not reply_required else None,
+            REPLY_DISPLAY_TOKEN: display_label if display_label and reply_required else None,
+            STATUS_DISPLAY_TOKEN: (status_display_label(label_state)
+                                   if label_state else None),
             INTERNET_WAIT_TOKEN: ("recovery" if record["internet_recovery"]
                                   else "transcript" if record["internet_wait"] else None),
             LEGACY_CONTEXT_SUPPRESSION_TOKEN: None,
@@ -976,7 +1029,6 @@ def reconcile(client, state, path):
         position = workspace_order.get(agent.get("workspace_id"))
         if position is not None:
             desired_tokens[WORKSPACE_TOKEN] = workspace_order_key(position)
-        session_label = tab_label_by_id.get(agent.get("tab_id"))
         if isinstance(session_label, str):
             desired_tokens[SESSION_TOKEN] = metadata_sort_key(session_label)
         token_updates = {
@@ -988,57 +1040,14 @@ def reconcile(client, state, path):
         if token_updates:
             fields["tokens"] = token_updates
         # Cache emitted text so dynamic interview/waiting/subagent labels stay idempotent.
-        if record["interview"]:
-            label_state = INTERVIEW_LABEL
-            labels = agent.get("state_labels") or {}
-            if (record["applied"] != label_state
-                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
-                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
-        elif record["internet_wait"]:
-            label_state = INTERNET_WAIT_LABEL
-            labels = agent.get("state_labels") or {}
-            if (record["applied"] != label_state
-                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
-                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
-        elif record["parallel_wait"]:
-            label_state = parallel_wait_label(record["parallel_wait"])
-            labels = agent.get("state_labels") or {}
-            if (record["applied"] != label_state
-                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
-                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
-        elif (record["coordinator_wait"]
-              and record["status"] not in ("working", "blocked")):
-            label_state = COORDINATOR_WAIT_LABEL
-            labels = agent.get("state_labels") or {}
-            if (record["applied"] != label_state
-                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
-                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
-        elif (record["coordinator_managed_wait"]
-              and record["status"] not in ("working", "blocked")):
-            label_state = coordinator_managed_wait_label(
-                record["coordinator_managed_wait"])
-            labels = agent.get("state_labels") or {}
-            if (record["applied"] != label_state
-                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
-                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
-        elif (record["coordinator_user_review"]
-              and record["status"] not in ("working", "blocked")):
-            label_state = COORDINATOR_USER_REVIEW_LABEL
-            labels = agent.get("state_labels") or {}
-            if (record["applied"] != label_state
-                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
-                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
-        elif record["subagent"]:
-            label_state = SUBAGENT_LABEL
-            labels = agent.get("state_labels") or {}
-            # pi-subagents refreshes its dynamic count label periodically. The
-            # pane.updated watcher lets this stable presentation label win again.
+        labels = agent.get("state_labels") or {}
+        if label_state:
+            # pi-subagents and coordinators may refresh their own labels. The
+            # pane.updated watcher lets the stable Priority+ presentation win again.
             if (record["applied"] != label_state
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         else:
-            label_state = False
-            labels = agent.get("state_labels") or {}
             stale_badge = (labels.get("idle") == LEGACY_PENDING_LABEL
                            or any(label in (INTERVIEW_LABEL, INTERNET_WAIT_LABEL,
                                             COORDINATOR_WAIT_LABEL,

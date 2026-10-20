@@ -31,10 +31,12 @@ class RealHerdrTests(unittest.TestCase):
             config = base / "config.toml"
             config.write_text('[update]\nversion_check = false\nmanifest_check = false\n'
                               '[ui.sidebar.agents]\nrows = [\n'
-                              '  ["state_icon", "agent", "workspace"],\n'
-                              '  [{ token = "state_text", rules = [{ equals = "⚠ Interview Pending" }, '
-                              '{ equals = "⏳ Waiting for Internet" }, '
-                              '{ equals = "⏳ Subagent working" }, { contains = "", hide = true }] }],\n]\n')
+                              '  ["state_icon", { token = "$pp_reply_display", fg = "#000000", '
+                              'bold = true }, "$pp_agent_display"],\n'
+                              '  [{ token = "$pp_status_display", rules = ['
+                              '{ contains = "Waiting for User Review", fg = "#000000", bold = true }, '
+                              '{ contains = "Interview Pending", fg = "#cb4b16", bold = true }, '
+                              '{ contains = "", fg = "#268bd2", bold = false }] }],\n]\n')
             env.update(HERDR_SOCKET_PATH=str(base / "api.sock"),
                        HERDR_CLIENT_SOCKET_PATH=str(base / "client.sock"),
                        HERDR_CONFIG_PATH=str(config), SHELL="/bin/sh", TERM="xterm-256color")

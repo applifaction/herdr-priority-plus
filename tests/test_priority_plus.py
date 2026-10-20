@@ -82,6 +82,23 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for Internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
+    def test_sidebar_display_helpers_make_hierarchy_explicit(self):
+        self.assertEqual(
+            pp.agent_display_label("APPLI", "Website Commit Consolidation"),
+            "APPLI Website Commit Consolidation",
+        )
+        self.assertEqual(pp.agent_display_label("APPLI", None), "APPLI")
+        self.assertEqual(
+            pp.status_display_label(pp.INTERNET_WAIT_LABEL),
+            "↳ ⏳ Waiting for Internet",
+        )
+        self.assertTrue(pp.is_reply_required_rank(pp.RANK_USER_REVIEW))
+        self.assertTrue(pp.is_reply_required_rank(pp.RANK_INTERVIEW))
+        self.assertTrue(pp.is_reply_required_rank(pp.RANK_BLOCKED))
+        self.assertTrue(pp.is_reply_required_rank(pp.RANK_PENDING))
+        self.assertFalse(pp.is_reply_required_rank(pp.RANK_WORKING))
+        self.assertFalse(pp.is_reply_required_rank(pp.RANK_DEPENDENCY_WAIT))
+
     def test_bootstrap_and_all_ranks(self):
         expected = {"blocked": "7", "done": "6", "working": "5", "idle": "3", "unknown": "0"}
         for status, expected_rank in expected.items():
@@ -1033,7 +1050,11 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(self.writes(), [])
         self.client.agents[0].update(agent_status="idle", state_change_seq=2)
         self.sync()
-        self.assertEqual(self.writes()[0]["tokens"], {pp.TOKEN: pp.RANK_PENDING})
+        self.assertEqual(self.writes()[0]["tokens"], {
+            pp.TOKEN: pp.RANK_PENDING,
+            pp.AGENT_DISPLAY_TOKEN: None,
+            pp.REPLY_DISPLAY_TOKEN: "main",
+        })
         self.assertNotIn("state_labels", self.writes()[0])
         self.client.calls.clear()
         self.client.agents[0]["state_labels"] = {"idle": "foreign later label"}
@@ -1044,8 +1065,53 @@ class ReconciliationTests(unittest.TestCase):
         for fields in self.writes():
             self.assertEqual(fields["source"], pp.SOURCE)
             self.assertNotIn("clear_state_labels", fields)
-            self.assertEqual(set(fields["tokens"]), {pp.TOKEN})
+            self.assertEqual(fields["tokens"], {
+                pp.TOKEN: pp.RANK_WORKING,
+                pp.AGENT_DISPLAY_TOKEN: "main",
+                pp.REPLY_DISPLAY_TOKEN: None,
+            })
         self.assertEqual(self.client.agents[0]["tokens"]["foreign"], "keep")
+
+    def test_sidebar_tokens_join_names_style_reply_rows_and_indent_statuses(self):
+        self.client.tabs = [{"tab_id": "w1:t1", "label": "Website Commit Consolidation"}]
+        self.client.agents[0] = agent("working", tab_id="w1:t1")
+
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(
+            current["tokens"][pp.AGENT_DISPLAY_TOKEN],
+            "main Website Commit Consolidation",
+        )
+        self.assertNotIn(pp.REPLY_DISPLAY_TOKEN, current["tokens"])
+        self.assertNotIn(pp.STATUS_DISPLAY_TOKEN, current["tokens"])
+
+        current.update(agent_status="done", state_change_seq=2)
+        self.sync()
+        self.assertNotIn(pp.AGENT_DISPLAY_TOKEN, current["tokens"])
+        self.assertEqual(
+            current["tokens"][pp.REPLY_DISPLAY_TOKEN],
+            "main Website Commit Consolidation",
+        )
+        self.assertNotIn(pp.STATUS_DISPLAY_TOKEN, current["tokens"])
+
+        current.update(agent_status="idle", state_change_seq=2)
+        current["tokens"][pp.COORDINATOR_USER_REVIEW_TOKEN] = "approval required"
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
+        self.assertEqual(
+            current["tokens"][pp.STATUS_DISPLAY_TOKEN],
+            "↳ 🙋 Waiting for User Review",
+        )
+
+        current["tokens"].pop(pp.COORDINATOR_USER_REVIEW_TOKEN)
+        current.update(agent_status="working", state_change_seq=3)
+        self.sync()
+        self.assertEqual(
+            current["tokens"][pp.AGENT_DISPLAY_TOKEN],
+            "main Website Commit Consolidation",
+        )
+        self.assertNotIn(pp.REPLY_DISPLAY_TOKEN, current["tokens"])
+        self.assertNotIn(pp.STATUS_DISPLAY_TOKEN, current["tokens"])
 
     def test_pending_interview_outranks_working_and_clears_after_result(self):
         session = Path(self.temp.name) / "session.jsonl"
@@ -1465,34 +1531,43 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(by_terminal["first-unread"]["tokens"], {
             pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: first_key,
             pp.SESSION_TOKEN: "zulu result",
+            pp.REPLY_DISPLAY_TOKEN: "Zulu first Zulu result",
         })
         self.assertEqual(by_terminal["first-reviewed"]["tokens"], {
             pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: first_key,
             pp.SESSION_TOKEN: "alpha result",
+            pp.REPLY_DISPLAY_TOKEN: "Zulu first alpha result",
         })
         self.assertEqual(by_terminal["second-unread"]["tokens"], {
             pp.TOKEN: pp.RANK_PENDING, pp.WORKSPACE_TOKEN: second_key,
             pp.SESSION_TOKEN: "pending",
+            pp.REPLY_DISPLAY_TOKEN: "Alpha second Pending",
         })
         self.assertEqual(by_terminal["second-working"]["tokens"], {
             pp.TOKEN: pp.RANK_WORKING, pp.WORKSPACE_TOKEN: second_key,
             pp.SESSION_TOKEN: "working",
+            pp.AGENT_DISPLAY_TOKEN: "Alpha second Working",
         })
         self.assertEqual(by_terminal["second-idle"]["tokens"], {
             pp.TOKEN: pp.RANK_IDLE, pp.WORKSPACE_TOKEN: second_key,
             pp.SESSION_TOKEN: "idle",
+            pp.AGENT_DISPLAY_TOKEN: "Alpha second Idle",
         })
         self.assertEqual(by_terminal["second-blocked"]["tokens"], {
             pp.TOKEN: pp.RANK_BLOCKED, pp.WORKSPACE_TOKEN: second_key,
             pp.SESSION_TOKEN: "blocked",
+            pp.REPLY_DISPLAY_TOKEN: "Alpha second Blocked",
         })
         self.assertEqual(by_terminal["second-subagent"]["tokens"], {
             "summary": "⏳ 1 subagent", pp.TOKEN: pp.RANK_SUBAGENT,
             pp.WORKSPACE_TOKEN: second_key, pp.SESSION_TOKEN: "subagent",
+            pp.AGENT_DISPLAY_TOKEN: "Alpha second Subagent",
+            pp.STATUS_DISPLAY_TOKEN: "↳ ⏳ Subagent working",
         })
         self.assertEqual(by_terminal["second-unknown"]["tokens"], {
             pp.TOKEN: pp.RANK_UNKNOWN, pp.WORKSPACE_TOKEN: second_key,
             pp.SESSION_TOKEN: "unknown",
+            pp.AGENT_DISPLAY_TOKEN: "Alpha second Unknown",
         })
 
         self.client.workspaces.reverse()
@@ -1548,28 +1623,36 @@ class ReconciliationTests(unittest.TestCase):
         later_a_key = pp.workspace_order_key(2)
         self.assertEqual(by_terminal["later-z"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_z_key, "pp_session_sort": "middle",
+            pp.AGENT_DISPLAY_TOKEN: "LATER/Zebra Middle",
         })
         self.assertEqual(by_terminal["later-a-beta"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key, "pp_session_sort": "zulu session",
+            pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Zulu session",
         })
         self.assertEqual(by_terminal["later-a-alpha"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key, "pp_session_sort": "alpha session",
+            pp.AGENT_DISPLAY_TOKEN: "LATER/alpha alpha session",
         })
         self.assertEqual(by_terminal["normal"]["tokens"], {
             pp.TOKEN: "3", pp.WORKSPACE_TOKEN: normal_key, pp.SESSION_TOKEN: "normal",
+            pp.AGENT_DISPLAY_TOKEN: "Main Normal",
         })
         self.assertEqual(by_terminal["later-working"]["tokens"], {
             pp.TOKEN: "5", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "working",
+            pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Working",
         })
         self.assertEqual(by_terminal["later-blocked"]["tokens"], {
             pp.TOKEN: "7", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "blocked",
+            pp.REPLY_DISPLAY_TOKEN: "LATER/alpha Blocked",
         })
         self.assertEqual(by_terminal["later-subagent"]["tokens"], {
             "summary": "⏳ 1 subagent", pp.TOKEN: "4", pp.WORKSPACE_TOKEN: later_a_key,
-            pp.SESSION_TOKEN: "subagent",
+            pp.SESSION_TOKEN: "subagent", pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Subagent",
+            pp.STATUS_DISPLAY_TOKEN: "↳ ⏳ Subagent working",
         })
         self.assertEqual(by_terminal["later-missing-tab"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key,
+            pp.AGENT_DISPLAY_TOKEN: "LATER/alpha",
         })
 
     def test_user_workspace_order_is_preserved_while_enabled(self):
@@ -1755,7 +1838,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.17.1")
+        self.assertEqual(manifest["version"], "0.18.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
