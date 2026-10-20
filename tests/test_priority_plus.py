@@ -137,20 +137,6 @@ class LifecycleTests(unittest.TestCase):
                 "blocked", tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "p1"}))),
             pp.RANK_BLOCKED,
         )
-        user_review = pp.observe(agent(
-            "idle", tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready"}))
-        self.assertEqual(user_review["coordinator_user_review"], "handoff ready")
-        self.assertEqual(pp.rank(user_review), pp.RANK_USER_REVIEW)
-        self.assertEqual(
-            pp.rank(pp.observe(agent(
-                "working", tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready"}))),
-            pp.RANK_WORKING,
-        )
-        self.assertEqual(
-            pp.rank(pp.observe(agent(
-                "blocked", tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready"}))),
-            pp.RANK_BLOCKED,
-        )
         interview_agent = agent(
             "working", agent_session={"source": "herdr:pi", "agent": "pi",
                                         "kind": "path", "value": "/sessions/interview.jsonl"})
@@ -650,37 +636,6 @@ class WatcherTests(unittest.TestCase):
             agent_status="idle",
             tokens={pp.TOKEN: pp.RANK_COORDINATOR_MANAGED_WAIT},
             state_labels={"idle": pp.COORDINATOR_MANAGED_WAIT_LABEL},
-        )
-        self.assertTrue(pp.needs_reconcile_event(removed))
-
-    def test_coordinator_user_review_metadata_edges_require_reconciliation(self):
-        active = self.pane_event(
-            agent_status="idle",
-            tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready",
-                    pp.TOKEN: pp.RANK_IDLE},
-        )
-        self.assertTrue(pp.needs_reconcile_event(active))
-
-        converged = self.pane_event(
-            agent_status="idle",
-            tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready",
-                    pp.TOKEN: pp.RANK_USER_REVIEW},
-            state_labels={state: pp.COORDINATOR_USER_REVIEW_LABEL
-                          for state in pp.SUBAGENT_STATES},
-        )
-        self.assertFalse(pp.needs_reconcile_event(converged))
-
-        working = self.pane_event(
-            agent_status="working",
-            tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready",
-                    pp.TOKEN: pp.RANK_WORKING},
-        )
-        self.assertFalse(pp.needs_reconcile_event(working))
-
-        removed = self.pane_event(
-            agent_status="idle",
-            tokens={pp.TOKEN: pp.RANK_USER_REVIEW},
-            state_labels={"idle": pp.COORDINATOR_USER_REVIEW_LABEL},
         )
         self.assertTrue(pp.needs_reconcile_event(removed))
 
@@ -1252,39 +1207,6 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
-    def test_user_review_sorts_first_only_while_settled_and_cleans_up(self):
-        self.client.agents[0] = agent(
-            "idle", 1,
-            tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready",
-                    pp.TOKEN: pp.RANK_IDLE},
-        )
-        self.sync()
-        current = self.client.agents[0]
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
-        self.assertGreater(pp.RANK_USER_REVIEW, pp.RANK_INTERVIEW)
-        self.assertEqual(current["state_labels"], {
-            state: pp.COORDINATOR_USER_REVIEW_LABEL for state in pp.SUBAGENT_STATES
-        })
-        self.assertEqual(
-            self.state["agents"]["term-1"]["coordinator_user_review"],
-            "handoff ready",
-        )
-
-        current["agent_status"] = "working"
-        current["state_change_seq"] = 2
-        self.client.calls.clear()
-        self.sync()
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
-        self.assertNotIn("state_labels", current)
-
-        current["agent_status"] = "idle"
-        current["state_change_seq"] = 3
-        current["tokens"].pop(pp.COORDINATOR_USER_REVIEW_TOKEN)
-        self.client.calls.clear()
-        self.sync()
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
-        self.assertNotIn("state_labels", current)
-
     def test_resource_queue_wait_moves_completion_below_reply_required_sessions(self):
         self.client.agents[0] = agent(
             "done", 1,
@@ -1699,7 +1621,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.16.0")
+        self.assertEqual(manifest["version"], "0.15.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
