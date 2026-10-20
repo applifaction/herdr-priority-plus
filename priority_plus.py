@@ -31,8 +31,10 @@ RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
 RESOURCE_WAIT_PREDECESSOR_TOKEN = "parallel_wait_predecessor"
 COORDINATOR_WAIT_OWNER_TOKEN = "coordinator_wait_owner"
 COORDINATOR_MANAGED_WAIT_TOKEN = "coordinator_managed_wait"
+COORDINATOR_USER_REVIEW_TOKEN = "coordinator_user_review"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, INTERNET_WAIT_TOKEN,
                 LEGACY_CONTEXT_SUPPRESSION_TOKEN)
+RANK_USER_REVIEW = "9"
 RANK_INTERVIEW = "8"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
@@ -51,10 +53,11 @@ SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 COORDINATOR_WAIT_LABEL = "⏳ Waiting for Coordinator"
 COORDINATOR_MANAGED_WAIT_LABEL = "⏳ Waiting for Managed Sessions"
+COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.15.0"
+WATCHER_VERSION = "0.16.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -617,6 +620,20 @@ def coordinator_managed_wait_is_visible(agent):
             and agent.get("agent_status") not in ("working", "blocked"))
 
 
+def coordinator_user_review(agent):
+    tokens = agent.get("tokens") or {}
+    reason = tokens.get(COORDINATOR_USER_REVIEW_TOKEN)
+    if not isinstance(reason, str):
+        return None
+    reason = " ".join(reason.split())
+    return reason[:METADATA_TOKEN_CHAR_LIMIT] or None
+
+
+def coordinator_user_review_is_visible(agent):
+    return (coordinator_user_review(agent) is not None
+            and agent.get("agent_status") not in ("working", "blocked"))
+
+
 def needs_reconcile_event(message):
     """Select metadata-only presentation edges omitted from plugin hooks."""
     if not isinstance(message, dict):
@@ -680,6 +697,12 @@ def needs_reconcile_event(message):
                 or any(labels.get(status) != COORDINATOR_MANAGED_WAIT_LABEL
                        for status in SUBAGENT_STATES))
     if any(label == COORDINATOR_MANAGED_WAIT_LABEL for label in labels.values()):
+        return True
+    if coordinator_user_review_is_visible(pane):
+        return (tokens.get(TOKEN) != RANK_USER_REVIEW
+                or any(labels.get(status) != COORDINATOR_USER_REVIEW_LABEL
+                       for status in SUBAGENT_STATES))
+    if any(label == COORDINATOR_USER_REVIEW_LABEL for label in labels.values()):
         return True
     if has_active_subagents(pane):
         return (tokens.get(TOKEN) != RANK_SUBAGENT
@@ -814,6 +837,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "parallel_wait": parallel_wait_target(agent),
             "coordinator_wait": coordinator_wait_owner(agent),
             "coordinator_managed_wait": coordinator_managed_wait(agent),
+            "coordinator_user_review": coordinator_user_review(agent),
             "interview": session_path in (interview_sessions or ()),
             "internet_wait": (internet_recovery
                               or session_path in (internet_waits or ())),
@@ -838,6 +862,10 @@ def rank(record):
         return RANK_BLOCKED
     if record["status"] == "working":
         return RANK_WORKING
+    # User-review handoffs belong at the very top only while settled. If the
+    # user starts a new turn or the session blocks, surface that real activity.
+    if record.get("coordinator_user_review"):
+        return RANK_USER_REVIEW
     # A coordinator hold hides only settled work. If the target unexpectedly
     # starts or blocks, surface the real activity instead of masking it.
     if record.get("coordinator_wait"):
@@ -971,6 +999,13 @@ def reconcile(client, state, path):
             if (record["applied"] != label_state
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
+        elif (record["coordinator_user_review"]
+              and record["status"] not in ("working", "blocked")):
+            label_state = COORDINATOR_USER_REVIEW_LABEL
+            labels = agent.get("state_labels") or {}
+            if (record["applied"] != label_state
+                    or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
+                fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         elif record["subagent"]:
             label_state = SUBAGENT_LABEL
             labels = agent.get("state_labels") or {}
@@ -985,7 +1020,8 @@ def reconcile(client, state, path):
             stale_badge = (labels.get("idle") == LEGACY_PENDING_LABEL
                            or any(label in (INTERVIEW_LABEL, INTERNET_WAIT_LABEL,
                                             COORDINATOR_WAIT_LABEL,
-                                            COORDINATOR_MANAGED_WAIT_LABEL)
+                                            COORDINATOR_MANAGED_WAIT_LABEL,
+                                            COORDINATOR_USER_REVIEW_LABEL)
                                   for label in labels.values())
                            or any(isinstance(label, str)
                                   and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
