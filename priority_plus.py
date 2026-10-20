@@ -31,6 +31,7 @@ RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
 RESOURCE_WAIT_PREDECESSOR_TOKEN = "parallel_wait_predecessor"
 COORDINATOR_WAIT_OWNER_TOKEN = "coordinator_wait_owner"
 COORDINATOR_MANAGED_WAIT_TOKEN = "coordinator_managed_wait"
+COORDINATOR_MANAGED_WAIT_TARGET_PREFIX = "target:"
 COORDINATOR_USER_REVIEW_TOKEN = "coordinator_user_review"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, INTERNET_WAIT_TOKEN,
                 LEGACY_CONTEXT_SUPPRESSION_TOKEN)
@@ -47,17 +48,18 @@ RANK_IDLE = "3"
 RANK_LATER = "2"
 RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
-RANK_COORDINATOR_WAIT = "0"
+RANK_COORDINATOR_WAIT = RANK_DEPENDENCY_WAIT
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "⏳ Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 COORDINATOR_WAIT_LABEL = "⏳ Waiting for Coordinator"
 COORDINATOR_MANAGED_WAIT_LABEL = "⏳ Waiting for Managed Sessions"
+COORDINATOR_MANAGED_WAIT_LABEL_PREFIX = "⏳ Waiting for "
 COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.16.0"
+WATCHER_VERSION = "0.17.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -615,9 +617,25 @@ def coordinator_managed_wait(agent):
     return reason[:METADATA_TOKEN_CHAR_LIMIT] or None
 
 
+def coordinator_managed_wait_label(wait_value):
+    if (isinstance(wait_value, str)
+            and wait_value.startswith(COORDINATOR_MANAGED_WAIT_TARGET_PREFIX)):
+        target = " ".join(
+            wait_value[len(COORDINATOR_MANAGED_WAIT_TARGET_PREFIX):].split())
+        if target:
+            return (COORDINATOR_MANAGED_WAIT_LABEL_PREFIX + target)[:METADATA_TOKEN_CHAR_LIMIT]
+    return COORDINATOR_MANAGED_WAIT_LABEL
+
+
 def coordinator_managed_wait_is_visible(agent):
     return (coordinator_managed_wait(agent) is not None
             and agent.get("agent_status") not in ("working", "blocked"))
+
+
+def is_coordinator_managed_wait_label(label):
+    return (label == COORDINATOR_MANAGED_WAIT_LABEL
+            or (isinstance(label, str)
+                and label.startswith(COORDINATOR_MANAGED_WAIT_LABEL_PREFIX)))
 
 
 def coordinator_user_review(agent):
@@ -693,10 +711,11 @@ def needs_reconcile_event(message):
     if any(label == COORDINATOR_WAIT_LABEL for label in labels.values()):
         return True
     if coordinator_managed_wait_is_visible(pane):
+        wait_label = coordinator_managed_wait_label(coordinator_managed_wait(pane))
         return (tokens.get(TOKEN) != RANK_COORDINATOR_MANAGED_WAIT
-                or any(labels.get(status) != COORDINATOR_MANAGED_WAIT_LABEL
+                or any(labels.get(status) != wait_label
                        for status in SUBAGENT_STATES))
-    if any(label == COORDINATOR_MANAGED_WAIT_LABEL for label in labels.values()):
+    if any(is_coordinator_managed_wait_label(label) for label in labels.values()):
         return True
     if coordinator_user_review_is_visible(pane):
         return (tokens.get(TOKEN) != RANK_USER_REVIEW
@@ -866,12 +885,11 @@ def rank(record):
     # user starts a new turn or the session blocks, surface that real activity.
     if record.get("coordinator_user_review"):
         return RANK_USER_REVIEW
-    # A coordinator hold hides only settled work. If the target unexpectedly
-    # starts or blocks, surface the real activity instead of masking it.
+    # Coordinator waits share the dependency-wait tier: below direct work and
+    # above ordinary idle/LATER/WAIT sessions. Active work and blockers win.
     if record.get("coordinator_wait"):
         return RANK_COORDINATOR_WAIT
-    # A coordinator waiting on managed sessions stays immediately below direct
-    # work, but above ordinary idle/LATER/WAIT sessions.
+    # A coordinator waiting on managed sessions uses the same tier.
     if record.get("coordinator_managed_wait"):
         return RANK_COORDINATOR_MANAGED_WAIT
     if record.get("parking") == "later":
@@ -994,7 +1012,8 @@ def reconcile(client, state, path):
                 fields["state_labels"] = {status: label_state for status in SUBAGENT_STATES}
         elif (record["coordinator_managed_wait"]
               and record["status"] not in ("working", "blocked")):
-            label_state = COORDINATOR_MANAGED_WAIT_LABEL
+            label_state = coordinator_managed_wait_label(
+                record["coordinator_managed_wait"])
             labels = agent.get("state_labels") or {}
             if (record["applied"] != label_state
                     or any(labels.get(status) != label_state for status in SUBAGENT_STATES)):
@@ -1024,7 +1043,8 @@ def reconcile(client, state, path):
                                             COORDINATOR_USER_REVIEW_LABEL)
                                   for label in labels.values())
                            or any(isinstance(label, str)
-                                  and label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
+                                  and (label.startswith(PARALLEL_WAIT_LABEL_PREFIX)
+                                       or is_coordinator_managed_wait_label(label))
                                   for label in labels.values()))
             if record["applied"] != label_state or stale_badge:
                 fields["clear_state_labels"] = True

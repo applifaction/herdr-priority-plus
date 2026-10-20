@@ -35,16 +35,16 @@ agents                  Priority+
   ⏳ Warte auf history & release
 ○ Parent idle while a child runs
   ⏳ Subagent working
-○ Coordinator idle while managed sessions run
-  ⏳ Waiting for Managed Sessions
+○ Coordinator idle while one managed session runs
+  ⏳ Waiting for <Tab/Session>
+○ Intentionally held by a coordinating Pi session
+  ⏳ Waiting for Coordinator
 ○ Ordinary idle
 ○ Inactive in a LATER workspace
 ○ Inactive in a WAIT workspace
-○ Intentionally held by a coordinating Pi session
-  ⏳ Waiting for Coordinator
 ```
 
-The additional badges read **`🙋 Waiting for User Review`**, **`⚠ Interview Pending`**, **`⏳ Waiting for Internet`**, **`⏳ Subagent working`**, **`⏳ Warte auf <Tab/Session>`**, **`⏳ Waiting for Managed Sessions`**, and **`⏳ Waiting for Coordinator`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
+The additional badges read **`🙋 Waiting for User Review`**, **`⚠ Interview Pending`**, **`⏳ Waiting for Internet`**, **`⏳ Subagent working`**, **`⏳ Warte auf <Tab/Session>`**, **`⏳ Waiting for <Tab/Session>`**, and **`⏳ Waiting for Coordinator`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
 
 ## What changes
 
@@ -59,12 +59,12 @@ The additional badges read **`🙋 Waiting for User Review`**, **`⚠ Interview 
 | 7 | Pi session waiting after a network or Codex tunnel failure | Shows `⏳ Waiting for Internet` and stays below every directly working session. |
 | 7 | Waiting on another Pi session or a durable resource-queue predecessor | Shows `⏳ Warte auf <Tab/Session>` and stays below every directly working session. |
 | 7 | Active pi-subagents child | Shows `⏳ Subagent working` below directly working agents. |
-| 7 | Settled coordinator waiting on managed sessions | Shows `⏳ Waiting for Managed Sessions` below directly working agents and above ordinary idle/LATER sessions. Working or blocked coordinator activity remains visible. |
+| 7 | Settled coordinator waiting on one managed session | Shows `⏳ Waiting for <Tab/Session>` below directly working agents and above ordinary idle/LATER sessions. Working or blocked coordinator activity remains visible. |
+| 7 | Settled session with a coordinator hold | Shows `⏳ Waiting for Coordinator` in the same dependency-wait tier until its coordinator clears the foreign hold token. Working or blocked sessions are never hidden by the hold. |
 | 8 | Ordinary idle | Remains below active work. |
 | 9 | Inactive in `LATER…` | Stays below ordinary idle. |
 | 10 | Inactive in `WAIT…` | Stays below LATER sessions. |
 | 11 | Unknown outside parked workspaces | Remains last. |
-| 11 | Settled session with a coordinator hold | Shows `⏳ Waiting for Coordinator` and remains last until its coordinator clears the foreign hold token. Working or blocked sessions are never hidden by the hold. |
 
 Inside each priority tier, sessions are grouped by the current top-left Spaces order: all matching sessions from the first Space appear before matching sessions from the second Space, and so on. The tier hierarchy itself stays unchanged—blocked remains above completed, completed above working, and so forth. Within one Space, every session sorts case-insensitively by its displayed tab name. Herdr's seen state and the most recent state change are only fallback tie-breakers for equal or unavailable tab names.
 
@@ -112,6 +112,8 @@ rows = [
     { equals = "⏳ Waiting for Internet", fg = "#268bd2", bold = true },
     { equals = "⏳ Subagent working", fg = "#268bd2", bold = true },
     { equals = "⏳ Waiting for Managed Sessions", fg = "#268bd2", bold = true },
+    { equals = "⏳ Waiting for Coordinator", fg = "#268bd2", bold = true },
+    { contains = "⏳ Waiting for ", fg = "#268bd2", bold = true },
     { contains = "⏳ Warte auf ", fg = "#268bd2", bold = true },
     { contains = "", hide = true },
   ] }],
@@ -123,7 +125,7 @@ The explicit rules show Priority+'s activity badges; the final rule hides every 
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** Version 0.16.0 projects a settled session's foreign `coordinator_user_review` token as `🙋 Waiting for User Review` in the first tier. Publishers must reserve it for a concrete unanswered user gate that blocks other managed sessions; add the matching teal rule shown above and invoke `enable` once. Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
+> **Upgrading:** Version 0.17.0 moves settled `Waiting for Coordinator` holds into the dependency-wait tier and renders target-aware `coordinator_managed_wait=target:<Tab/Session>` metadata as `⏳ Waiting for <Tab/Session>`; add the dynamic blue rule shown above and invoke `enable` once. Version 0.16.0 projects a settled session's foreign `coordinator_user_review` token as `🙋 Waiting for User Review` in the first tier. Publishers must reserve it for a concrete unanswered user gate that blocks other managed sessions; add the matching teal rule shown above and invoke `enable` once. Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -210,9 +212,9 @@ The same bounded active-branch projection recognizes transport failures such as 
 
 When the Pi Parallel Session Watch extension publishes `parallel_wait_target`, Priority+ places that pane below every directly working session and shows `⏳ Warte auf <target>`. Durable resource-queue waits receive the same treatment when the extension publishes both `parallel_wait_resource_ticket` and `parallel_wait_predecessor`. This keeps a settled Pi turn that is still waiting out of both the higher reply-required completion tier and the directly working tier. The extension retains ownership of all wait tokens; Priority+ only projects them. Removing the relevant tokens restores the underlying lifecycle/completion rank and clears the dynamic label.
 
-A coordinating process can publish the foreign `coordinator_wait_owner` token while deliberately holding a session for a later dependency. Priority+ projects settled targets as `⏳ Waiting for Coordinator` at its lowest rank. It deliberately preserves normal working and blocked ranks so a stale hold cannot hide active work or a real blocker. The coordinator owns clearing the token before it resumes the target; Priority+ never mutates it.
+A coordinating process can publish the foreign `coordinator_wait_owner` token while deliberately holding a session for a later dependency. Priority+ projects settled targets as `⏳ Waiting for Coordinator` at the dependency-wait rank: below direct work and above ordinary idle/LATER sessions. It deliberately preserves normal working and blocked ranks so a stale hold cannot hide active work or a real blocker. The coordinator owns clearing the token before it resumes the target; Priority+ never mutates it.
 
-A coordinator can publish the foreign `coordinator_managed_wait` token on its own pane when no user decision is pending and it is waiting for managed sessions. Priority+ projects a settled coordinator as `⏳ Waiting for Managed Sessions` at the common dependency-wait rank: below direct work, above ordinary idle and parked sessions. Working or blocked coordinator activity retains its real rank. Clearing the token restores the underlying lifecycle/completion rank.
+A coordinator can publish `coordinator_managed_wait=target:<Tab/Session>` on its own pane when no user decision is pending and it is waiting for one immediate managed dependency. Priority+ projects a settled coordinator as `⏳ Waiting for <Tab/Session>` at the same dependency-wait rank. Legacy unstructured values retain `⏳ Waiting for Managed Sessions`. Working or blocked coordinator activity retains its real rank. Clearing the token restores the underlying lifecycle/completion rank.
 
 When a settled session presents a concrete unanswered user decision or approval that blocks other managed sessions, a coordinator can publish the foreign `coordinator_user_review` token. Priority+ projects that gate as `🙋 Waiting for User Review` in the first tier. This token is not for ordinary completion handoffs. The dependents use `coordinator_managed_wait`, which stays below working sessions. A new working turn or blocker surfaces its real lifecycle rank; clearing the tokens after the answer restores normal ranking.
 
