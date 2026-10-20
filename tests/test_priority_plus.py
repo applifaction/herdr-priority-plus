@@ -1237,6 +1237,39 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
+    def test_coordinator_wait_stays_between_working_and_later_during_gate_overlap(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w5V:p1A",
+                    pp.COORDINATOR_USER_REVIEW_TOKEN: "commit plan approval",
+                    pp.TOKEN: pp.RANK_USER_REVIEW},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_WAIT_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_WAIT)
+        self.assertLess(pp.RANK_COORDINATOR_WAIT, pp.RANK_WORKING)
+        self.assertGreater(pp.RANK_COORDINATOR_WAIT, pp.RANK_LATER)
+
+    def test_coordinator_managed_wait_stays_below_working_during_gate_overlap(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_MANAGED_WAIT_TOKEN: "target:release evidence",
+                    pp.COORDINATOR_USER_REVIEW_TOKEN: "approval superseded by dependency",
+                    pp.TOKEN: pp.RANK_USER_REVIEW},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        expected_label = "⏳ Waiting for release evidence"
+        self.assertEqual(current["state_labels"], {
+            state: expected_label for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_MANAGED_WAIT)
+        self.assertLess(pp.RANK_COORDINATOR_MANAGED_WAIT, pp.RANK_WORKING)
+        self.assertGreater(pp.RANK_COORDINATOR_MANAGED_WAIT, pp.RANK_LATER)
+
     def test_coordinator_managed_wait_sits_below_working_and_above_later(self):
         self.client.agents[0] = agent(
             "idle", 1,
@@ -1722,7 +1755,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.17.0")
+        self.assertEqual(manifest["version"], "0.17.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

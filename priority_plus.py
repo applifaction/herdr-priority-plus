@@ -59,7 +59,7 @@ COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.17.0"
+WATCHER_VERSION = "0.17.1"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -881,17 +881,20 @@ def rank(record):
         return RANK_BLOCKED
     if record["status"] == "working":
         return RANK_WORKING
-    # User-review handoffs belong at the very top only while settled. If the
-    # user starts a new turn or the session blocks, surface that real activity.
-    if record.get("coordinator_user_review"):
-        return RANK_USER_REVIEW
     # Coordinator waits share the dependency-wait tier: below direct work and
     # above ordinary idle/LATER/WAIT sessions. Active work and blockers win.
+    # Wait metadata also wins during a publisher's brief transition overlap
+    # with user-review metadata, matching the badge selected below.
     if record.get("coordinator_wait"):
         return RANK_COORDINATOR_WAIT
     # A coordinator waiting on managed sessions uses the same tier.
     if record.get("coordinator_managed_wait"):
         return RANK_COORDINATOR_MANAGED_WAIT
+    # User-review handoffs belong at the very top only while settled and not
+    # superseded by an explicit coordinator wait. If the user starts a new turn
+    # or the session blocks, surface that real activity.
+    if record.get("coordinator_user_review"):
+        return RANK_USER_REVIEW
     if record.get("parking") == "later":
         return RANK_LATER
     if record.get("parking") == "wait":
