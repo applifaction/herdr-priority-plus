@@ -90,7 +90,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.agent_display_label("APPLI", None), "APPLI")
         self.assertEqual(
             pp.status_display_label(pp.INTERNET_WAIT_LABEL),
-            "↳ ⏳ Waiting for Internet",
+            pp.STATUS_INDENT + "↳ ⏳ Waiting for Internet",
         )
         self.assertTrue(pp.is_reply_required_rank(pp.RANK_USER_REVIEW))
         self.assertTrue(pp.is_reply_required_rank(pp.RANK_INTERVIEW))
@@ -1100,7 +1100,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
         self.assertEqual(
             current["tokens"][pp.STATUS_DISPLAY_TOKEN],
-            "↳ 🙋 Waiting for User Review",
+            pp.STATUS_INDENT + "↳ 🙋 Waiting for User Review",
         )
 
         current["tokens"].pop(pp.COORDINATOR_USER_REVIEW_TOKEN)
@@ -1562,7 +1562,7 @@ class ReconciliationTests(unittest.TestCase):
             "summary": "⏳ 1 subagent", pp.TOKEN: pp.RANK_SUBAGENT,
             pp.WORKSPACE_TOKEN: second_key, pp.SESSION_TOKEN: "subagent",
             pp.AGENT_DISPLAY_TOKEN: "Alpha second Subagent",
-            pp.STATUS_DISPLAY_TOKEN: "↳ ⏳ Subagent working",
+            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ ⏳ Subagent working",
         })
         self.assertEqual(by_terminal["second-unknown"]["tokens"], {
             pp.TOKEN: pp.RANK_UNKNOWN, pp.WORKSPACE_TOKEN: second_key,
@@ -1648,7 +1648,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(by_terminal["later-subagent"]["tokens"], {
             "summary": "⏳ 1 subagent", pp.TOKEN: "4", pp.WORKSPACE_TOKEN: later_a_key,
             pp.SESSION_TOKEN: "subagent", pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Subagent",
-            pp.STATUS_DISPLAY_TOKEN: "↳ ⏳ Subagent working",
+            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ ⏳ Subagent working",
         })
         self.assertEqual(by_terminal["later-missing-tab"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key,
@@ -1838,7 +1838,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.18.0")
+        self.assertEqual(manifest["version"], "0.18.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

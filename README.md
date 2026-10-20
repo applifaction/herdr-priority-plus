@@ -22,23 +22,23 @@ With Herdr's symbol indicators enabled:
 agents                  Priority+
 
 ○ Handoff ready for user review
-  ↳ 🙋 Waiting for User Review
+   ↳ 🙋 Waiting for User Review
 ◐ Working, waiting for interview input
-  ↳ ⚠ Interview Pending
+   ↳ ⚠ Interview Pending
 × Blocked
 ✓ Finished, not yet viewed
 ○ Reviewed result, still prioritized
 ◐ Working
 ◐ Retrying after a network failure
-  ↳ ⏳ Waiting for Internet
+   ↳ ⏳ Waiting for Internet
 ○ Waiting for another Pi session
-  ↳ ⏳ Warte auf history & release
+   ↳ ⏳ Warte auf history & release
 ○ Parent idle while a child runs
-  ↳ ⏳ Subagent working
+   ↳ ⏳ Subagent working
 ○ Coordinator idle while one managed session runs
-  ↳ ⏳ Waiting for <Tab/Session>
+   ↳ ⏳ Waiting for <Tab/Session>
 ○ Intentionally held by a coordinating Pi session
-  ↳ ⏳ Waiting for Coordinator
+   ↳ ⏳ Waiting for Coordinator
 ○ Ordinary idle
 ○ Inactive in a LATER workspace
 ○ Inactive in a WAIT workspace
@@ -117,12 +117,12 @@ rows = [
 ]
 ```
 
-`$pp_reply_display` is emitted only for reply-required ranks above direct work, so those Space/tab labels render black and bold. `$pp_agent_display` covers all other agents without extra emphasis. `$pp_status_display` already contains the `↳ ` hierarchy marker and disappears when there is no supplemental status. Do not add separate `workspace`, `tab`, or `state_text` tokens alongside these rows, or the same information will be duplicated. If you use `rows_by_agent` overrides, apply the rows to the relevant overrides too.
+`$pp_reply_display` is emitted only for reply-required ranks above direct work, so those Space/tab labels render black and bold. `$pp_agent_display` covers all other agents without extra emphasis. `$pp_status_display` already contains a one-cell indent before the `↳ ` hierarchy marker and disappears when there is no supplemental status. Do not add separate `workspace`, `tab`, or `state_text` tokens alongside these rows, or the same information will be duplicated. If you use `rows_by_agent` overrides, apply the rows to the relevant overrides too.
 
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** Version 0.18.0 adds compact Space/tab display tokens, black bold reply-required names, and indented non-bold operational wait rows; replace the old `workspace`/`tab` and `state_text` rows with the example above, then invoke `enable` once. Version 0.17.1 keeps a visible coordinator wait in the dependency-wait tier even during a brief metadata transition that still carries an older user-review token; invoke `enable` once to restart the watcher. Version 0.17.0 moves settled `Waiting for Coordinator` holds into the dependency-wait tier and renders target-aware `coordinator_managed_wait=target:<Tab/Session>` metadata as `⏳ Waiting for <Tab/Session>`; add the dynamic blue rule shown above and invoke `enable` once. Version 0.16.0 projects a settled session's foreign `coordinator_user_review` token as `🙋 Waiting for User Review` in the first tier. Publishers must reserve it for a concrete unanswered user gate that blocks other managed sessions; add the matching teal rule shown above and invoke `enable` once. Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
+> **Upgrading:** Version 0.18.1 adds one leading space before each `↳` status marker so the status icon aligns more closely with the Space/tab label above; invoke `enable` once. Version 0.18.0 adds compact Space/tab display tokens, black bold reply-required names, and indented non-bold operational wait rows; replace the old `workspace`/`tab` and `state_text` rows with the example above, then invoke `enable` once. Version 0.17.1 keeps a visible coordinator wait in the dependency-wait tier even during a brief metadata transition that still carries an older user-review token; invoke `enable` once to restart the watcher. Version 0.17.0 moves settled `Waiting for Coordinator` holds into the dependency-wait tier and renders target-aware `coordinator_managed_wait=target:<Tab/Session>` metadata as `⏳ Waiting for <Tab/Session>`; add the dynamic blue rule shown above and invoke `enable` once. Version 0.16.0 projects a settled session's foreign `coordinator_user_review` token as `🙋 Waiting for User Review` in the first tier. Publishers must reserve it for a concrete unanswered user gate that blocks other managed sessions; add the matching teal rule shown above and invoke `enable` once. Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -199,7 +199,7 @@ Cleanup also stops the event watcher and pauses tracking so queued hooks cannot 
 
 ## How it works
 
-Short-lived hooks reconcile Herdr's agent, workspace, and tab snapshots and track completion by terminal and agent/session identity. A `pp_rank` metadata token controls the priority section. Every session receives a zero-padded `pp_workspace_sort` position derived from the authoritative visible workspace list, so each rank independently follows the Spaces order. When the tab join is available, every session also receives a case-folded, Herdr-bounded `pp_session_sort` token from its displayed tab name. Herdr's **client-local `seen`** and the state-change sequence remain fallback tie-breakers. Priority+ also publishes mutually exclusive `pp_agent_display` and `pp_reply_display` values that join the authoritative Space and tab labels with one ordinary space, plus an optional `pp_status_display` value prefixed by `↳ `. Pending completions keep their reply-required name emphasis without receiving a redundant status row.
+Short-lived hooks reconcile Herdr's agent, workspace, and tab snapshots and track completion by terminal and agent/session identity. A `pp_rank` metadata token controls the priority section. Every session receives a zero-padded `pp_workspace_sort` position derived from the authoritative visible workspace list, so each rank independently follows the Spaces order. When the tab join is available, every session also receives a case-folded, Herdr-bounded `pp_session_sort` token from its displayed tab name. Herdr's **client-local `seen`** and the state-change sequence remain fallback tie-breakers. Priority+ also publishes mutually exclusive `pp_agent_display` and `pp_reply_display` values that join the authoritative Space and tab labels with one ordinary space, plus an optional `pp_status_display` value with a one-cell indent before `↳ `. Pending completions keep their reply-required name emphasis without receiving a redundant status row.
 
 On the first compatible observation of an idle Pi session, Priority+ checks whether the reported JSONL session's active head is a non-empty assistant text response. If so, it restores the pending-completion rank even when watcher state was missing after a restart or upgrade. The completed transcript classification is persisted, so an unchanged idle session is not scanned repeatedly.
 

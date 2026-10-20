@@ -303,7 +303,7 @@ rows = [
                     }
                     params = {'pane_id': panes[name], 'source': 'test:pp-presentation', 'tokens': tokens}
                     if name == 'SUBAGENT':
-                        tokens['pp_status_display'] = '↳ ⏳ Subagent working'
+                        tokens['pp_status_display'] = '\u2800↳ ⏳ Subagent working'
                         params['state_labels'] = {'idle': '⏳ Subagent working'}
                     rpc('pane.report_metadata', params)
             lines = capture('before_review')
@@ -316,12 +316,13 @@ rows = [
             assert order[:5] == expected_prefix, order
             assert order[5:] == expected_suffix, order
             assert not any('Awaiting reply' in line for line in lines)
-            assert sum('↳ ⏳ Subagent working' in line for line in lines) == 1
+            assert sum('\u2800↳ ⏳ Subagent working' in line for line in lines) == 1
             assert not any(' · ' in line and any(name in line for name in panes) for line in lines)
             reply_cells = rendered_cells('fixture BLOCKED')
             assert all(cell.bold for cell in reply_cells), 'Reply-required name must be bold'
             assert all(cell.fg == '000000' for cell in reply_cells), 'Reply-required name must be black'
-            wait_cells = rendered_cells('↳ ⏳ Subagent working')
+            wait_cells = rendered_cells('\u2800↳ ⏳ Subagent working')
+            assert wait_cells[0].data == '\u2800', 'Status marker must have a blank leading cell'
             assert not any(cell.bold for cell in wait_cells), 'Operational wait must not be bold'
             assert all(cell.fg == '268bd2' for cell in wait_cells), 'Operational wait must be blue'
             for parked_name, marker in (
@@ -343,6 +344,8 @@ rows = [
             lines = capture('after_typing_only')
             assert not any('Awaiting reply' in line for line in lines)
             report(panes['REVIEWED'], 'working')
+            if args.plugin:
+                action('refresh')
             if not args.plugin:
                 rpc('pane.report_metadata', {'pane_id': panes['REVIEWED'], 'source': 'test:pp-presentation', 'clear_state_labels': True, 'tokens': {'pp_rank': '5', 'pp_reply_display': None, 'pp_agent_display': 'fixture REVIEWED'}})
             lines = capture('next_working_run')

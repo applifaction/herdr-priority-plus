@@ -63,7 +63,7 @@ COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.18.0"
+WATCHER_VERSION = "0.18.1"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -72,6 +72,9 @@ SUBAGENT_STATUS_STALE_SECONDS = 10 * 60
 SESSION_TAIL_LIMIT = 1024 * 1024
 METADATA_TOKEN_CHAR_LIMIT = 80
 DISPLAY_TOKEN_CHAR_LIMIT = 256
+# Herdr trims ordinary leading whitespace from metadata values. The blank
+# braille cell survives normalization while rendering as a one-column indent.
+STATUS_INDENT = "\u2800"
 ACTIVE_RUN_STATES = ("queued", "running")
 TERMINAL_RUN_STATES = ("complete", "completed", "failed", "stopped", "cancelled", "canceled")
 SUBAGENT_STATES = ("blocked", "idle", "done", "working")
@@ -880,7 +883,7 @@ def agent_display_label(workspace_label, tab_label):
 
 def status_display_label(label):
     """Indent a supplemental state so it reads as a child of the agent row."""
-    return ("↳ " + label)[:DISPLAY_TOKEN_CHAR_LIMIT]
+    return (STATUS_INDENT + "↳ " + label)[:DISPLAY_TOKEN_CHAR_LIMIT]
 
 
 def is_reply_required_rank(value):
