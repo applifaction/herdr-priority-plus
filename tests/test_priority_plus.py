@@ -1374,6 +1374,42 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
+    def test_recovery_review_outranks_settled_coordination_without_hiding_active_work(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_RECOVERY_TOKEN: "required",
+                    pp.COORDINATOR_RECOVERY_REASON_TOKEN: "remote write outcome unknown",
+                    pp.COORDINATOR_MANAGED_WAIT_TOKEN: "target:release evidence",
+                    pp.COORDINATOR_USER_REVIEW_TOKEN: "approval",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_RECOVERY_REQUIRED)
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_RECOVERY_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(
+            self.state["agents"]["term-1"]["coordinator_recovery"],
+            "remote write outcome unknown",
+        )
+
+        current["agent_status"] = "working"
+        current["state_change_seq"] = 2
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn("state_labels", current)
+
+        current["agent_status"] = "idle"
+        current["state_change_seq"] = 3
+        current["tokens"].pop(pp.COORDINATOR_RECOVERY_TOKEN)
+        current["tokens"].pop(pp.COORDINATOR_RECOVERY_REASON_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_MANAGED_WAIT)
+        self.assertEqual(current["state_labels"]["idle"], "⏳ Waiting for release evidence")
+
     def test_user_review_sorts_first_only_while_settled_and_cleans_up(self):
         self.client.agents[0] = agent(
             "idle", 1,
@@ -1838,7 +1874,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.18.1")
+        self.assertEqual(manifest["version"], "0.19.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

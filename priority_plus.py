@@ -36,10 +36,13 @@ COORDINATOR_WAIT_OWNER_TOKEN = "coordinator_wait_owner"
 COORDINATOR_MANAGED_WAIT_TOKEN = "coordinator_managed_wait"
 COORDINATOR_MANAGED_WAIT_TARGET_PREFIX = "target:"
 COORDINATOR_USER_REVIEW_TOKEN = "coordinator_user_review"
+COORDINATOR_RECOVERY_TOKEN = "coordinator_recovery"
+COORDINATOR_RECOVERY_REASON_TOKEN = "coordinator_recovery_reason"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, AGENT_DISPLAY_TOKEN,
                 REPLY_DISPLAY_TOKEN, STATUS_DISPLAY_TOKEN, INTERNET_WAIT_TOKEN,
                 LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_USER_REVIEW = "9"
+RANK_RECOVERY_REQUIRED = RANK_USER_REVIEW
 RANK_INTERVIEW = "8"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
@@ -60,10 +63,11 @@ COORDINATOR_WAIT_LABEL = "⏳ Waiting for Coordinator"
 COORDINATOR_MANAGED_WAIT_LABEL = "⏳ Waiting for Managed Sessions"
 COORDINATOR_MANAGED_WAIT_LABEL_PREFIX = "⏳ Waiting for "
 COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
+COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.18.1"
+WATCHER_VERSION = "0.19.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -660,6 +664,23 @@ def coordinator_user_review_is_visible(agent):
             and agent.get("agent_status") not in ("working", "blocked"))
 
 
+def coordinator_recovery(agent):
+    tokens = agent.get("tokens") or {}
+    marker = tokens.get(COORDINATOR_RECOVERY_TOKEN)
+    if not isinstance(marker, str) or not marker.strip():
+        return None
+    reason = tokens.get(COORDINATOR_RECOVERY_REASON_TOKEN)
+    if not isinstance(reason, str):
+        reason = marker
+    reason = " ".join(reason.split())
+    return reason[:METADATA_TOKEN_CHAR_LIMIT] or None
+
+
+def coordinator_recovery_is_visible(agent):
+    return (coordinator_recovery(agent) is not None
+            and agent.get("agent_status") not in ("working", "blocked"))
+
+
 def needs_reconcile_event(message):
     """Select metadata-only presentation edges omitted from plugin hooks."""
     if not isinstance(message, dict):
@@ -680,6 +701,12 @@ def needs_reconcile_event(message):
     if not isinstance(labels, dict):
         labels = {}
     if labels.get("idle") == LEGACY_PENDING_LABEL:
+        return True
+    if coordinator_recovery_is_visible(pane):
+        return (tokens.get(TOKEN) != RANK_RECOVERY_REQUIRED
+                or any(labels.get(status) != COORDINATOR_RECOVERY_LABEL
+                       for status in SUBAGENT_STATES))
+    if any(label == COORDINATOR_RECOVERY_LABEL for label in labels.values()):
         return True
     interview_visible = (tokens.get(TOKEN) == RANK_INTERVIEW
                          or any(label == INTERVIEW_LABEL for label in labels.values()))
@@ -865,6 +892,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "coordinator_wait": coordinator_wait_owner(agent),
             "coordinator_managed_wait": coordinator_managed_wait(agent),
             "coordinator_user_review": coordinator_user_review(agent),
+            "coordinator_recovery": coordinator_recovery(agent),
             "interview": session_path in (interview_sessions or ()),
             "internet_wait": (internet_recovery
                               or session_path in (internet_waits or ())),
@@ -906,10 +934,13 @@ def rank(record):
         return RANK_BLOCKED
     if record["status"] == "working":
         return RANK_WORKING
+    # A recovery review outranks all settled coordination states. Active work
+    # and blockers still win so a resumed turn is never presented as idle.
+    if record.get("coordinator_recovery"):
+        return RANK_RECOVERY_REQUIRED
     # Coordinator waits share the dependency-wait tier: below direct work and
-    # above ordinary idle/LATER/WAIT sessions. Active work and blockers win.
-    # Wait metadata also wins during a publisher's brief transition overlap
-    # with user-review metadata, matching the badge selected below.
+    # above ordinary idle/LATER/WAIT sessions. Wait metadata still wins during
+    # a publisher's brief overlap with ordinary user-review metadata.
     if record.get("coordinator_wait"):
         return RANK_COORDINATOR_WAIT
     # A coordinator waiting on managed sessions uses the same tier.
@@ -937,6 +968,9 @@ def presentation_label(record):
         return INTERNET_WAIT_LABEL
     if record.get("parallel_wait"):
         return parallel_wait_label(record["parallel_wait"])
+    if (record.get("coordinator_recovery")
+            and record["status"] not in ("working", "blocked")):
+        return COORDINATOR_RECOVERY_LABEL
     if (record.get("coordinator_wait")
             and record["status"] not in ("working", "blocked")):
         return COORDINATOR_WAIT_LABEL
