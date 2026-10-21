@@ -33,6 +33,8 @@ PARALLEL_WAIT_TARGET_TOKEN = "parallel_wait_target"
 RESOURCE_WAIT_TICKET_TOKEN = "parallel_wait_resource_ticket"
 RESOURCE_WAIT_PREDECESSOR_TOKEN = "parallel_wait_predecessor"
 COORDINATOR_WAIT_OWNER_TOKEN = "coordinator_wait_owner"
+COORDINATOR_ACCEPTED_COMPLETION_TOKEN = "coordinator_accepted_completion"
+COORDINATOR_ACCEPTED_COMPLETION_OUTCOME_TOKEN = "coordinator_accepted_completion_outcome"
 COORDINATOR_MANAGED_WAIT_TOKEN = "coordinator_managed_wait"
 COORDINATOR_MANAGED_WAIT_TARGET_PREFIX = "target:"
 COORDINATOR_USER_REVIEW_TOKEN = "coordinator_user_review"
@@ -52,6 +54,7 @@ RANK_DEPENDENCY_WAIT = "4"
 RANK_SUBAGENT = "4"
 RANK_COORDINATOR_MANAGED_WAIT = "4"
 RANK_IDLE = "3"
+RANK_ACCEPTED_COMPLETION = RANK_IDLE
 RANK_LATER = "2"
 RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
@@ -62,6 +65,7 @@ LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "🤖 Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 COORDINATOR_WAIT_LABEL = "⏳ Waiting for Coordinator"
+ACCEPTED_COMPLETION_LABEL = "✅ Accepted / pending completion"
 COORDINATOR_MANAGED_WAIT_LABEL = "⏳ Waiting for Managed Sessions"
 COORDINATOR_MANAGED_WAIT_LABEL_PREFIX = "⏳ Waiting for "
 COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
@@ -69,7 +73,7 @@ COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.20.1"
+WATCHER_VERSION = "0.20.2"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -617,6 +621,20 @@ def coordinator_wait_owner(agent):
     return owner[:METADATA_TOKEN_CHAR_LIMIT] or None
 
 
+def coordinator_accepted_completion(agent):
+    tokens = agent.get("tokens") or {}
+    owner = tokens.get(COORDINATOR_ACCEPTED_COMPLETION_TOKEN)
+    if not isinstance(owner, str):
+        return None
+    owner = " ".join(owner.split())
+    return owner[:METADATA_TOKEN_CHAR_LIMIT] or None
+
+
+def coordinator_accepted_completion_is_visible(agent):
+    return (coordinator_accepted_completion(agent) is not None
+            and agent.get("agent_status") not in ("working", "blocked"))
+
+
 def coordinator_wait_is_visible(agent):
     return (coordinator_wait_owner(agent) is not None
             and agent.get("agent_status") not in ("working", "blocked"))
@@ -747,6 +765,18 @@ def needs_reconcile_event(message):
                        for status in SUBAGENT_STATES))
     if any(label == COORDINATOR_WAIT_LABEL for label in labels.values()):
         return True
+    if coordinator_accepted_completion_is_visible(pane):
+        return (tokens.get(TOKEN) != RANK_ACCEPTED_COMPLETION
+                or any(labels.get(status) != ACCEPTED_COMPLETION_LABEL
+                       for status in SUBAGENT_STATES))
+    if (coordinator_accepted_completion(pane) is not None
+            and pane.get("agent_status") in ("working", "blocked")
+            and (tokens.get(TOKEN) == RANK_ACCEPTED_COMPLETION
+                 or any(label == ACCEPTED_COMPLETION_LABEL
+                        for label in labels.values()))):
+        return True
+    if any(label == ACCEPTED_COMPLETION_LABEL for label in labels.values()):
+        return True
     if coordinator_managed_wait_is_visible(pane):
         wait_label = coordinator_managed_wait_label(coordinator_managed_wait(pane))
         return (tokens.get(TOKEN) != RANK_COORDINATOR_MANAGED_WAIT
@@ -773,7 +803,7 @@ def needs_reconcile_event(message):
 
 def watch_events(socket_path, on_reconcile, on_ready=None, on_tick=None,
                  tick_seconds=WATCH_TICK_SECONDS):
-    """Subscribe until shutdown; return true only when Herdr requests recovery."""
+    """Subscribe until explicit stop; return true when the stream must recover."""
     watcher = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     watcher.settimeout(5)
     try:
@@ -816,7 +846,7 @@ def watch_events(socket_path, on_reconcile, on_ready=None, on_tick=None,
                     continue
                 chunk = watcher.recv(65536)
                 if not chunk:
-                    return False
+                    return True
                 buffer += chunk
                 if len(buffer) > 8 * 1024 * 1024:
                     raise RuntimeError("Herdr event exceeds 8 MiB")
@@ -896,6 +926,7 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "subagent": has_active_subagents(agent, active_sessions),
             "parallel_wait": parallel_wait_target(agent),
             "coordinator_wait": coordinator_wait_owner(agent),
+            "coordinator_accepted_completion": coordinator_accepted_completion(agent),
             "coordinator_managed_wait": coordinator_managed_wait(agent),
             "coordinator_user_review": coordinator_user_review(agent),
             "coordinator_recovery": coordinator_recovery(agent),
@@ -960,6 +991,8 @@ def rank(record):
     # A coordinator waiting on managed sessions uses the same tier.
     if record.get("coordinator_managed_wait"):
         return RANK_COORDINATOR_MANAGED_WAIT
+    if record.get("coordinator_accepted_completion"):
+        return RANK_ACCEPTED_COMPLETION
     # Explicit coordinator waits above deliberately consumed an overlapping
     # review token. A remaining review token was already returned before the
     # generic working/blocked lifecycle ranks.
@@ -996,6 +1029,9 @@ def presentation_label(record):
             and not record.get("coordinator_wait")
             and not record.get("coordinator_managed_wait")):
         return COORDINATOR_USER_REVIEW_LABEL
+    if (record.get("coordinator_accepted_completion")
+            and record["status"] not in ("working", "blocked")):
+        return ACCEPTED_COMPLETION_LABEL
     return False
 
 
@@ -1198,6 +1234,7 @@ def run_watcher(directory, socket_path):
         os.write(fd, f"{os.getpid()} {WATCHER_VERSION}".encode())
         os.fsync(fd)
         reconcile_now = lambda: run("sync", directory, socket_path)
+        reconnect_now = lambda: run("startup", directory, socket_path)
         subagent_projection = active_subagent_sessions()
         interview_cache = {}
         interview_projection = tracked_pending_interview_sessions(
@@ -1234,7 +1271,7 @@ def run_watcher(directory, socket_path):
                 return reconcile_now()
             return True
 
-        while watch_events(socket_path, reconcile_now, on_ready=reconcile_now, on_tick=tick):
+        while watch_events(socket_path, reconcile_now, on_ready=reconnect_now, on_tick=tick):
             time.sleep(0.05)
     finally:
         os.close(fd)

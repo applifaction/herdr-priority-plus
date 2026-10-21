@@ -647,6 +647,46 @@ class WatcherTests(unittest.TestCase):
         )
         self.assertTrue(pp.needs_reconcile_event(removed))
 
+    def test_accepted_completion_metadata_edges_require_reconciliation(self):
+        active = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.assertTrue(pp.needs_reconcile_event(active))
+
+        converged = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_ACCEPTED_COMPLETION},
+            state_labels={state: pp.ACCEPTED_COMPLETION_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(converged))
+
+        working = self.pane_event(
+            agent_status="working",
+            tokens={pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_WORKING},
+        )
+        self.assertFalse(pp.needs_reconcile_event(working))
+
+        stale_working = self.pane_event(
+            agent_status="working",
+            tokens={pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_ACCEPTED_COMPLETION},
+            state_labels={state: pp.ACCEPTED_COMPLETION_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertTrue(pp.needs_reconcile_event(stale_working))
+
+        removed = self.pane_event(
+            agent_status="idle",
+            tokens={pp.TOKEN: pp.RANK_ACCEPTED_COMPLETION},
+            state_labels={"idle": pp.ACCEPTED_COMPLETION_LABEL},
+        )
+        self.assertTrue(pp.needs_reconcile_event(removed))
+
     def test_coordinator_managed_wait_metadata_edges_require_reconciliation(self):
         active = self.pane_event(
             agent_status="idle",
@@ -859,13 +899,31 @@ class WatcherTests(unittest.TestCase):
             thread.start()
             reconciles = []
             try:
-                pp.watch_events(path, lambda: reconciles.append(True))
+                reconnect = pp.watch_events(path, lambda: reconciles.append(True))
             finally:
                 server.close()
                 thread.join(5)
+            self.assertTrue(reconnect)
             self.assertEqual(requests[0]["method"], "events.subscribe")
             self.assertEqual(requests[0]["params"], {"subscriptions": [{"type": "pane.updated"}]})
             self.assertEqual(reconciles, [True])
+
+    def test_watcher_reinstalls_view_after_server_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def connect_once(_socket_path, _on_reconcile, on_ready=None, on_tick=None):
+                self.assertIsNotNone(on_ready)
+                on_ready()
+                return False
+
+            with patch("priority_plus.watch_events", side_effect=connect_once), \
+                    patch("priority_plus.run", return_value=True) as run, \
+                    patch("priority_plus.active_subagent_sessions", return_value=set()), \
+                    patch("priority_plus.tracked_pending_interview_sessions", return_value=set()), \
+                    patch("priority_plus.tracked_internet_wait_sessions", return_value=set()), \
+                    patch("priority_plus.tracked_fetch_recovery_waits", return_value=set()):
+                pp.run_watcher(directory, "/tmp/pp-reconnect-socket")
+
+        run.assert_called_once_with("startup", directory, "/tmp/pp-reconnect-socket")
 
     def test_socket_watcher_ticks_without_events_and_resubscribes_after_loss(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1311,6 +1369,54 @@ class ReconciliationTests(unittest.TestCase):
         current["agent_status"] = "idle"
         current["state_change_seq"] = 3
         current["tokens"].pop(pp.COORDINATOR_WAIT_OWNER_TOKEN)
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
+        self.assertNotIn("state_labels", current)
+
+    def test_accepted_completion_projects_only_while_settled_and_is_not_reply_required(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN: "w61:pG",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_ACCEPTED_COMPLETION)
+        self.assertEqual(pp.RANK_ACCEPTED_COMPLETION, pp.RANK_IDLE)
+        self.assertFalse(pp.is_reply_required_rank(pp.RANK_ACCEPTED_COMPLETION))
+        self.assertEqual(current["state_labels"], {
+            state: pp.ACCEPTED_COMPLETION_LABEL for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(
+            self.state["agents"]["term-1"]["coordinator_accepted_completion"],
+            "w61:pG",
+        )
+
+        current["agent_status"] = "working"
+        current["state_change_seq"] = 2
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn("state_labels", current)
+
+        current["agent_status"] = "idle"
+        current["state_change_seq"] = 3
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_ACCEPTED_COMPLETION)
+        self.assertEqual(current["state_labels"]["idle"], pp.ACCEPTED_COMPLETION_LABEL)
+
+        current["agent_status"] = "blocked"
+        current["state_change_seq"] = 4
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_BLOCKED)
+        self.assertNotIn("state_labels", current)
+
+        current["agent_status"] = "idle"
+        current["state_change_seq"] = 5
+        current["tokens"].pop(pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN)
         self.client.calls.clear()
         self.sync()
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
@@ -1919,7 +2025,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.20.1")
+        self.assertEqual(manifest["version"], "0.20.2")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
