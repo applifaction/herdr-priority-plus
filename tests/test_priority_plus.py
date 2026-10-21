@@ -74,7 +74,7 @@ class LifecycleTests(unittest.TestCase):
     def test_only_explicit_activity_badges_are_active(self):
         self.assertFalse(hasattr(pp, "LABEL"))
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
-        self.assertEqual(pp.LATER_WORKSPACE_PREFIXES, ("LATER", "🔖"))
+        self.assertEqual(pp.LATER_WORKSPACE_PREFIXES, ("LATER", "💤"))
         self.assertEqual(pp.WAIT_WORKSPACE_PREFIXES, ("WAIT", "⏳"))
         self.assertEqual(pp.SUBAGENT_LABEL, "🤖 Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
@@ -214,12 +214,12 @@ class LifecycleTests(unittest.TestCase):
                 self.assertTrue(pp.is_parked_workspace(label))
                 self.assertFalse(pp.is_later_workspace(label))
         for label in ("LATER", "LATER/MP", "LATERAL", "LATER-list",
-                      "🔖", "🔖 MP", "🔖/MP"):
+                      "💤", "💤 MP", "💤/MP"):
             with self.subTest(label=label):
                 self.assertTrue(pp.is_later_workspace(label))
                 self.assertTrue(pp.is_parked_workspace(label))
                 self.assertFalse(pp.is_wait_workspace(label))
-        for label in (None, "", "wait/MP", "later/MP", " LATER/MP", "AWAIT/MP"):
+        for label in (None, "", "wait/MP", "later/MP", " LATER/MP", "AWAIT/MP", "🔖/MP"):
             with self.subTest(label=label):
                 self.assertFalse(pp.is_wait_workspace(label))
                 self.assertFalse(pp.is_later_workspace(label))
@@ -1532,7 +1532,7 @@ class ReconciliationTests(unittest.TestCase):
             ("WAIT/MP", "wait", "1"),
             ("⏳/MP", "wait", "1"),
             ("LATER/MP", "later", "2"),
-            ("🔖/MP", "later", "2"),
+            ("💤/MP", "later", "2"),
         )
         for parked_label, expected_kind, expected_rank in parked_workspaces:
             with self.subTest(parked_label=parked_label):
@@ -1919,7 +1919,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.20.0")
+        self.assertEqual(manifest["version"], "0.20.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
