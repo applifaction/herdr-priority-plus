@@ -150,8 +150,8 @@ class RealHerdrTests(unittest.TestCase):
                     subagent = fixture("subagent")
                     waiting = fixture("WAIT/fixture")
                     later = fixture("LATER/fixture")
-                    waiting_alpha = fixture("WAIT/alpha")
-                    later_alpha = fixture("LATER/alpha")
+                    waiting_alpha = fixture("⏳/alpha")
+                    later_alpha = fixture("🔖/alpha")
                     later_alpha_workspace = get(later_alpha)["workspace_id"]
                     call("tab.rename", tab_id=get(later_alpha)["tab_id"], label="Zulu session")
                     later_alpha_second = call(
@@ -162,7 +162,7 @@ class RealHerdrTests(unittest.TestCase):
                     after_parked = fixture("normal-after-parked")
                     expected_workspace_order = [
                         "focused", "background", "blocked", "plain-idle", "working", "subagent",
-                        "WAIT/fixture", "LATER/fixture", "WAIT/alpha", "LATER/alpha",
+                        "WAIT/fixture", "LATER/fixture", "⏳/alpha", "🔖/alpha",
                         "normal-after-parked",
                     ]
                     wait(lambda: workspace_labels() == expected_workspace_order,
@@ -180,6 +180,9 @@ class RealHerdrTests(unittest.TestCase):
                     report(later_alpha, "idle")
                     report(later_alpha_second, "idle")
                     report(waiting_alpha, "idle")
+                    expect_rank(later_alpha, "2")
+                    expect_rank(later_alpha_second, "2")
+                    expect_rank(waiting_alpha, "1")
                     expect_sort_tokens(later_alpha, "Zulu session")
                     expect_sort_tokens(later_alpha_second, "alpha session")
                     expect_sort_tokens(waiting_alpha, "Wait session")

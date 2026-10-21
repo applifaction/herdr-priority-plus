@@ -56,6 +56,8 @@ RANK_LATER = "2"
 RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
 RANK_COORDINATOR_WAIT = RANK_DEPENDENCY_WAIT
+LATER_WORKSPACE_PREFIXES = ("LATER", "🔖")
+WAIT_WORKSPACE_PREFIXES = ("WAIT", "⏳")
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
 SUBAGENT_LABEL = "🤖 Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
@@ -67,7 +69,7 @@ COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.19.1"
+WATCHER_VERSION = "0.20.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -260,9 +262,9 @@ def load_state(path, boot):
 def workspace_parking_kind(label):
     if not isinstance(label, str):
         return None
-    if label.startswith("LATER"):
+    if label.startswith(LATER_WORKSPACE_PREFIXES):
         return "later"
-    if label.startswith("WAIT"):
+    if label.startswith(WAIT_WORKSPACE_PREFIXES):
         return "wait"
     return None
 

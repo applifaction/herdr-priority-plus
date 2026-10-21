@@ -74,6 +74,8 @@ class LifecycleTests(unittest.TestCase):
     def test_only_explicit_activity_badges_are_active(self):
         self.assertFalse(hasattr(pp, "LABEL"))
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
+        self.assertEqual(pp.LATER_WORKSPACE_PREFIXES, ("LATER", "🔖"))
+        self.assertEqual(pp.WAIT_WORKSPACE_PREFIXES, ("WAIT", "⏳"))
         self.assertEqual(pp.SUBAGENT_LABEL, "🤖 Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
         self.assertEqual(pp.COORDINATOR_WAIT_LABEL, "⏳ Waiting for Coordinator")
@@ -204,13 +206,15 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(pp.observe(agent("idle", 1, revision=900), first)["pending"])
         self.assertTrue(pp.observe(agent("idle", 3), first)["pending"])
 
-    def test_parked_workspace_detection_is_case_sensitive_prefix(self):
-        for label in ("WAIT", "WAIT/MP", "WAITING", "WAIT-list"):
+    def test_parked_workspace_detection_accepts_text_and_emoji_prefixes(self):
+        for label in ("WAIT", "WAIT/MP", "WAITING", "WAIT-list",
+                      "⏳", "⏳ MP", "⏳/MP"):
             with self.subTest(label=label):
                 self.assertTrue(pp.is_wait_workspace(label))
                 self.assertTrue(pp.is_parked_workspace(label))
                 self.assertFalse(pp.is_later_workspace(label))
-        for label in ("LATER", "LATER/MP", "LATERAL", "LATER-list"):
+        for label in ("LATER", "LATER/MP", "LATERAL", "LATER-list",
+                      "🔖", "🔖 MP", "🔖/MP"):
             with self.subTest(label=label):
                 self.assertTrue(pp.is_later_workspace(label))
                 self.assertTrue(pp.is_parked_workspace(label))
@@ -1524,7 +1528,13 @@ class ReconciliationTests(unittest.TestCase):
         self.assertNotIn("state_labels", self.client.agents[0])
 
     def test_wait_and_later_suppress_and_restore_pending_presentation(self):
-        for parked_label in ("WAIT/MP", "LATER/MP"):
+        parked_workspaces = (
+            ("WAIT/MP", "wait", "1"),
+            ("⏳/MP", "wait", "1"),
+            ("LATER/MP", "later", "2"),
+            ("🔖/MP", "later", "2"),
+        )
+        for parked_label, expected_kind, expected_rank in parked_workspaces:
             with self.subTest(parked_label=parked_label):
                 completed = pp.observe(agent("done", 2))
                 # Recover even if an older run left its pending-label contribution visible.
@@ -1539,8 +1549,7 @@ class ReconciliationTests(unittest.TestCase):
                 record = self.state["agents"]["term-1"]
                 self.assertTrue(record["pending"])
                 self.assertTrue(record["waiting"])
-                expected_rank = "2" if parked_label.startswith("LATER") else "1"
-                self.assertEqual(record["parking"], "later" if expected_rank == "2" else "wait")
+                self.assertEqual(record["parking"], expected_kind)
                 self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], expected_rank)
                 self.assertNotIn("state_labels", self.client.agents[0])
                 self.client.calls.clear()
@@ -1910,7 +1919,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.19.1")
+        self.assertEqual(manifest["version"], "0.20.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
