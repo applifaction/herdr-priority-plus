@@ -57,7 +57,7 @@ RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
 RANK_COORDINATOR_WAIT = RANK_DEPENDENCY_WAIT
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
-SUBAGENT_LABEL = "⏳ Subagent working"
+SUBAGENT_LABEL = "🤖 Subagent working"
 PARALLEL_WAIT_LABEL_PREFIX = "⏳ Warte auf "
 COORDINATOR_WAIT_LABEL = "⏳ Waiting for Coordinator"
 COORDINATOR_MANAGED_WAIT_LABEL = "⏳ Waiting for Managed Sessions"
@@ -67,7 +67,7 @@ COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.19.0"
+WATCHER_VERSION = "0.19.1"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -661,7 +661,7 @@ def coordinator_user_review(agent):
 
 def coordinator_user_review_is_visible(agent):
     return (coordinator_user_review(agent) is not None
-            and agent.get("agent_status") not in ("working", "blocked"))
+            and agent.get("agent_status") != "working")
 
 
 def coordinator_recovery(agent):
@@ -756,6 +756,10 @@ def needs_reconcile_event(message):
         return (tokens.get(TOKEN) != RANK_USER_REVIEW
                 or any(labels.get(status) != COORDINATOR_USER_REVIEW_LABEL
                        for status in SUBAGENT_STATES))
+    if (coordinator_user_review(pane) is not None
+            and pane.get("agent_status") == "working"
+            and tokens.get(TOKEN) == RANK_USER_REVIEW):
+        return True
     if any(label == COORDINATOR_USER_REVIEW_LABEL for label in labels.values()):
         return True
     if has_active_subagents(pane):
@@ -930,6 +934,14 @@ def rank(record):
         return RANK_DEPENDENCY_WAIT
     if record.get("subagent"):
         return RANK_SUBAGENT
+    # A concrete unanswered user gate remains authoritative until its publisher
+    # clears the token, except while the session is directly working. Explicit
+    # coordinator waits keep precedence during their intentional handoff overlap.
+    if (record.get("coordinator_user_review")
+            and record["status"] != "working"
+            and not record.get("coordinator_wait")
+            and not record.get("coordinator_managed_wait")):
+        return RANK_USER_REVIEW
     if record["status"] == "blocked":
         return RANK_BLOCKED
     if record["status"] == "working":
@@ -946,11 +958,9 @@ def rank(record):
     # A coordinator waiting on managed sessions uses the same tier.
     if record.get("coordinator_managed_wait"):
         return RANK_COORDINATOR_MANAGED_WAIT
-    # User-review handoffs belong at the very top only while settled and not
-    # superseded by an explicit coordinator wait. If the user starts a new turn
-    # or the session blocks, surface that real activity.
-    if record.get("coordinator_user_review"):
-        return RANK_USER_REVIEW
+    # Explicit coordinator waits above deliberately consumed an overlapping
+    # review token. A remaining review token was already returned before the
+    # generic working/blocked lifecycle ranks.
     if record.get("parking") == "later":
         return RANK_LATER
     if record.get("parking") == "wait":
@@ -977,11 +987,13 @@ def presentation_label(record):
     if (record.get("coordinator_managed_wait")
             and record["status"] not in ("working", "blocked")):
         return coordinator_managed_wait_label(record["coordinator_managed_wait"])
-    if (record.get("coordinator_user_review")
-            and record["status"] not in ("working", "blocked")):
-        return COORDINATOR_USER_REVIEW_LABEL
     if record.get("subagent"):
         return SUBAGENT_LABEL
+    if (record.get("coordinator_user_review")
+            and record["status"] != "working"
+            and not record.get("coordinator_wait")
+            and not record.get("coordinator_managed_wait")):
+        return COORDINATOR_USER_REVIEW_LABEL
     return False
 
 

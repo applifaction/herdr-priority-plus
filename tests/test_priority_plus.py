@@ -74,7 +74,7 @@ class LifecycleTests(unittest.TestCase):
     def test_only_explicit_activity_badges_are_active(self):
         self.assertFalse(hasattr(pp, "LABEL"))
         self.assertEqual(pp.LEGACY_PENDING_LABEL, "◉ Awaiting reply")
-        self.assertEqual(pp.SUBAGENT_LABEL, "⏳ Subagent working")
+        self.assertEqual(pp.SUBAGENT_LABEL, "🤖 Subagent working")
         self.assertEqual(pp.PARALLEL_WAIT_LABEL_PREFIX, "⏳ Warte auf ")
         self.assertEqual(pp.COORDINATOR_WAIT_LABEL, "⏳ Waiting for Coordinator")
         self.assertEqual(pp.COORDINATOR_MANAGED_WAIT_LABEL, "⏳ Waiting for Managed Sessions")
@@ -169,7 +169,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(
             pp.rank(pp.observe(agent(
                 "blocked", tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready"}))),
-            pp.RANK_BLOCKED,
+            pp.RANK_USER_REVIEW,
         )
         interview_agent = agent(
             "working", agent_session={"source": "herdr:pi", "agent": "pi",
@@ -708,6 +708,15 @@ class WatcherTests(unittest.TestCase):
                     pp.TOKEN: pp.RANK_WORKING},
         )
         self.assertFalse(pp.needs_reconcile_event(working))
+
+        stale_working_review = self.pane_event(
+            agent_status="working",
+            tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready",
+                    pp.TOKEN: pp.RANK_USER_REVIEW},
+            state_labels={state: pp.COORDINATOR_USER_REVIEW_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertTrue(pp.needs_reconcile_event(stale_working_review))
 
         removed = self.pane_event(
             agent_status="idle",
@@ -1319,6 +1328,15 @@ class ReconciliationTests(unittest.TestCase):
         self.assertLess(pp.RANK_COORDINATOR_WAIT, pp.RANK_WORKING)
         self.assertGreater(pp.RANK_COORDINATOR_WAIT, pp.RANK_LATER)
 
+        current["tokens"].pop(pp.COORDINATOR_WAIT_OWNER_TOKEN)
+        current["state_change_seq"] = 2
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_USER_REVIEW_LABEL for state in pp.SUBAGENT_STATES
+        })
+
     def test_coordinator_managed_wait_stays_below_working_during_gate_overlap(self):
         self.client.agents[0] = agent(
             "idle", 1,
@@ -1410,7 +1428,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_MANAGED_WAIT)
         self.assertEqual(current["state_labels"]["idle"], "⏳ Waiting for release evidence")
 
-    def test_user_review_sorts_first_only_while_settled_and_cleans_up(self):
+    def test_user_review_sorts_first_only_while_not_working(self):
         self.client.agents[0] = agent(
             "idle", 1,
             tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "handoff ready",
@@ -1437,6 +1455,24 @@ class ReconciliationTests(unittest.TestCase):
 
         current["agent_status"] = "idle"
         current["state_change_seq"] = 3
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_USER_REVIEW_LABEL for state in pp.SUBAGENT_STATES
+        })
+
+        current["agent_status"] = "blocked"
+        current["state_change_seq"] = 4
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
+        self.assertEqual(current["state_labels"], {
+            state: pp.COORDINATOR_USER_REVIEW_LABEL for state in pp.SUBAGENT_STATES
+        })
+
+        current["agent_status"] = "idle"
+        current["state_change_seq"] = 5
         current["tokens"].pop(pp.COORDINATOR_USER_REVIEW_TOKEN)
         self.client.calls.clear()
         self.sync()
@@ -1598,7 +1634,7 @@ class ReconciliationTests(unittest.TestCase):
             "summary": "⏳ 1 subagent", pp.TOKEN: pp.RANK_SUBAGENT,
             pp.WORKSPACE_TOKEN: second_key, pp.SESSION_TOKEN: "subagent",
             pp.AGENT_DISPLAY_TOKEN: "Alpha second Subagent",
-            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ ⏳ Subagent working",
+            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ 🤖 Subagent working",
         })
         self.assertEqual(by_terminal["second-unknown"]["tokens"], {
             pp.TOKEN: pp.RANK_UNKNOWN, pp.WORKSPACE_TOKEN: second_key,
@@ -1684,7 +1720,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(by_terminal["later-subagent"]["tokens"], {
             "summary": "⏳ 1 subagent", pp.TOKEN: "4", pp.WORKSPACE_TOKEN: later_a_key,
             pp.SESSION_TOKEN: "subagent", pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Subagent",
-            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ ⏳ Subagent working",
+            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ 🤖 Subagent working",
         })
         self.assertEqual(by_terminal["later-missing-tab"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key,
@@ -1874,7 +1910,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.19.0")
+        self.assertEqual(manifest["version"], "0.19.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
