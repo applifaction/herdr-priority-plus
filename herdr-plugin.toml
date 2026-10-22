@@ -1,8 +1,8 @@
 id = "local.priority-plus"
 name = "Priority+"
-version = "0.20.5"
+version = "0.21.0"
 min_herdr_version = "0.9.1"
-description = "Priority sorting for recovery review, interviews, completions, coordinator/managed/internet/peer/resource waits, subagents, Spaces, and tab names"
+description = "Priority sorting for operation reconciliation, recovery failures, user review, completions, coordinator/internet/resource waits, subagents, Spaces, and tabs"
 platforms = ["linux"]
 
 [[startup]]

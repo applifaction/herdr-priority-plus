@@ -14,25 +14,28 @@
 
 A small [Herdr](https://herdr.dev) plugin that keeps **viewed completions above running agents** until the next work cycle. Opening a finished session no longer means losing track of it at the bottom of your queue.
 
-Built for multi-session Pi workflows, Priority+ uses Herdr's lifecycle and display metadata for normal ranking. It additionally inspects a bounded tail of reported Pi session files to recover unanswered assistant completions after startup, detect an unresolved `interview` tool call, and recognize retries after network failures. Inside every priority tier, it groups sessions by the visible **Spaces order** and then sorts them alphabetically by tab name within each Space. It adds conditional badges for **recovery review**, **accepted completions awaiting user follow-up**, **pending interviews**, **internet waits**, **subagent work**, **coordinator holds**, and **asynchronous peer or resource-queue waits**, and provides a toggleable Agents view. Native status icons stay unchanged.
+Built for multi-session Pi workflows, Priority+ uses Herdr's lifecycle and display metadata for normal ranking. It additionally inspects a bounded tail of reported Pi session files to recover unanswered assistant completions after startup, detect an unresolved `interview` tool call, and recognize retries after network failures. Inside every priority tier, it groups sessions by the visible **Spaces order** and then sorts them alphabetically by tab name within each Space. It distinguishes **automated operation reconciliation**, **coordinator-owned operation review**, **Herdr restart recovery failures**, and **actual user-review gates** instead of presenting every recovery state as user work. It also adds conditional badges for accepted completions, pending interviews, internet waits, subagent work, coordinator holds, and asynchronous peer or resource-queue waits, and provides a toggleable Agents view. Native status icons stay unchanged.
 
 With Herdr's symbol indicators enabled:
 
 ```text
 agents                  Priority+
 
-○ Interrupted mutation that needs review
-   ↳ ⚠ Recovery Review Required
 ○ Handoff ready for user review
    ↳ 🙋 Waiting for User Review
 ○ Accepted result awaiting user follow-up
    ↳ ✅ Accepted / pending completion
 ◐ Working, waiting for interview input
    ↳ ⚠ Interview Pending
+○ Unresolved operation awaiting coordinator review
+   ↳ ⚠ Coordinator Operation Review Required
+○ Failed Herdr restart restoration
+   ↳ ⚠ Herdr Restart Recovery Failed
 × Blocked
 ✓ Finished, not yet viewed
 ○ Reviewed result, still prioritized
 ◐ Working
+   ↳ 🔄 Reconciling Operation
 ◐ Retrying after a network failure
    ↳ ⏳ Waiting for Internet
 ○ Waiting for another Pi session
@@ -43,25 +46,27 @@ agents                  Priority+
    ↳ ⏳ Waiting for <Tab/Session>
 ○ Intentionally held by a coordinating Pi session
    ↳ ⏳ Waiting for Coordinator
+○ Settled while an exact operation is reconciled automatically
+   ↳ 🔄 Reconciling Operation
 ○ Ordinary idle
 ○ Shelved in a 💤 or LATER workspace
 ○ Inactive in a ⏳ or WAIT workspace
 ```
 
-The additional badges read **`⚠ Recovery Review Required`**, **`🙋 Waiting for User Review`**, **`✅ Accepted / pending completion`**, **`⚠ Interview Pending`**, **`⏳ Waiting for Internet`**, **`🤖 Subagent working`**, **`⏳ Warte auf <Tab/Session>`**, **`⏳ Waiting for <Tab/Session>`**, and **`⏳ Waiting for Coordinator`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
+The additional badges distinguish **`🔄 Reconciling Operation`**, **`⚠ Coordinator Operation Review Required`**, **`⚠ Herdr Restart Recovery Failed`**, **`🙋 Waiting for User Review`**, **`✅ Accepted / pending completion`**, **`⚠ Interview Pending`**, and the operational wait labels. Legacy recovery metadata remains compatible as **`⚠ Recovery Review Required`**. Pending completions remain prioritized without an extra text row. Plugin action titles are currently German.
 
 ## What changes
 
 | Priority | Session state | Behavior |
 | --- | --- | --- |
-| 1 | Settled interrupted session marked for recovery review | Shows `⚠ Recovery Review Required` in the first settled tier. Working or blocked activity remains visible instead. |
 | 1 | Session whose chat-visible handoff awaits user review | Shows `🙋 Waiting for User Review` in the first tier until its publisher clears the gate. A directly working session temporarily uses the normal working rank; blocked and settled sessions keep the review gate. |
 | 1 | Accepted coordinator result awaiting user follow-up | Shows `✅ Accepted / pending completion` in the first tier with the same bold reply-required presentation as the other user-action states. Direct work or a blocked state remains visible while active; the accepted result returns when the session settles. |
 | 2 | Working with an unresolved Pi `interview` call | Shows `⚠ Interview Pending`. |
-| 3 | Blocked | Stays above ordinary completions and active work. |
+| 3 | Blocked, coordinator-owned operation review, or failed Herdr restart restoration | Keeps internal safety work below actual user/interview gates and above ordinary completions. A current coordinator wait replaces latent review metadata with its operational wait tier. |
 | 4 | Completed, not viewed outside a parked Space | Keeps Herdr's native done indicator near the top and groups it by Spaces order. |
 | 5 | Completed, viewed, no new run | Stays above ordinary working agents without an extra badge and groups it by Spaces order. |
-| 6 | Working | Clears the previous completion marker. |
+| 6 | Working | Clears the previous completion marker. Active automated reconciliation remains in this tier and shows `🔄 Reconciling Operation`. |
+| 7 | Settled exact operation under automated reconciliation | Shows `🔄 Reconciling Operation` below direct work and above ordinary idle/LATER sessions. It does not request user input. |
 | 7 | Pi session waiting after a network or Codex tunnel failure | Shows `⏳ Waiting for Internet` and stays below every directly working session. |
 | 7 | Waiting on another Pi session or a durable resource-queue predecessor | Shows `⏳ Warte auf <Tab/Session>` and stays below every directly working session. |
 | 7 | Active pi-subagents child | Shows `🤖 Subagent working` below directly working agents. |
@@ -114,7 +119,9 @@ rows = [
   # separator dot between separate workspace and tab tokens.
   ["state_icon", { token = "$pp_reply_display", fg = "#000000", bold = true }, "$pp_agent_display"],
   [{ token = "$pp_status_display", rules = [
-    # Recovery/user gates stay emphasized.
+    # Actual user gates and exceptional internal recovery failures stay emphasized.
+    { contains = "Operation Review Required", fg = "#dc322f", bold = true },
+    { contains = "Restart Recovery Failed", fg = "#dc322f", bold = true },
     { contains = "Recovery Review Required", fg = "#dc322f", bold = true },
     { contains = "Waiting for User Review", fg = "#000000", bold = true },
     { contains = "Accepted / pending completion", fg = "#000000", bold = true },
@@ -130,7 +137,7 @@ rows = [
 This affects the **expanded desktop sidebar**. Collapsed and mobile layouts keep their native compact appearance.
 
 > [!NOTE]
-> **Upgrading:** Version 0.20.5 makes every priority tier follow Herdr's live Space order directly, so reordered `LATER…`/`💤…` Spaces no longer depend on refreshed metadata; invoke `enable` once to replace the older view and watcher. Version 0.20.4 makes `LATER…`/`💤…` authoritative for every contained session, regardless of status, and hides each parked session's supplemental Agents status row; invoke `enable` once to replace the older watcher. Version 0.20.3 moves `✅ Accepted / pending completion` into the highest user-action tier and gives it the same bold presentation as other sessions that require a response; invoke `enable` once to replace the older watcher. Version 0.20.2 restores priority sorting automatically after a Herdr server restart or crash by re-registering the Priority+ Agents view whenever the watcher reconnects; invoke `enable` once to replace the older watcher. Version 0.20.1 replaces the short-lived `🔖` alias with `💤` as the exact emoji alternative to the `LATER` prefix. Version 0.20.0 added emoji parking aliases; `⏳` remains the exact alternative to `WAIT`, and each emoji uses the same inactive rank as its text counterpart. Invoke `enable` once. Version 0.19.1 keeps a published `🙋 Waiting for User Review` gate in the highest rank until its publisher clears the token, except while Herdr reports direct work; blocked and settled sessions keep the gate, while working sessions temporarily use the normal working rank without clearing the token. It also renders active child work as `🤖 Subagent working`. Invoke `enable` once. Version 0.19.0 adds the `⚠ Recovery Review Required` projection for interrupted work that must not be replayed automatically; add the red rule shown above and invoke `enable` once. Version 0.18.1 adds one leading space before each `↳` status marker so the status icon aligns more closely with the Space/tab label above; invoke `enable` once. Version 0.18.0 adds compact Space/tab display tokens, black bold reply-required names, and indented non-bold operational wait rows; replace the old `workspace`/`tab` and `state_text` rows with the example above, then invoke `enable` once. Version 0.17.1 keeps a visible coordinator wait in the dependency-wait tier even during a brief metadata transition that still carries an older user-review token; invoke `enable` once to restart the watcher. Version 0.17.0 moves settled `Waiting for Coordinator` holds into the dependency-wait tier and renders target-aware `coordinator_managed_wait=target:<Tab/Session>` metadata as `⏳ Waiting for <Tab/Session>`; add the dynamic blue rule shown above and invoke `enable` once. Version 0.16.0 projects a settled session's foreign `coordinator_user_review` token as `🙋 Waiting for User Review` in the first tier. Publishers must reserve it for a concrete unanswered user gate that blocks other managed sessions; add the matching teal rule shown above and invoke `enable` once. Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
+> **Upgrading:** Version 0.21.0 separates automatic operation reconciliation, coordinator-owned operation review, Herdr restart recovery failures, and actual user-review gates. Automated reconciliation shares the operational-wait tier when settled; coordinator waits override latent review metadata; only actual user gates remain in the first tier. Add the two exceptional-recovery color rules shown above and invoke `enable` once. Version 0.20.5 makes every priority tier follow Herdr's live Space order directly, so reordered `LATER…`/`💤…` Spaces no longer depend on refreshed metadata; invoke `enable` once to replace the older view and watcher. Version 0.20.4 makes `LATER…`/`💤…` authoritative for every contained session, regardless of status, and hides each parked session's supplemental Agents status row; invoke `enable` once to replace the older watcher. Version 0.20.3 moves `✅ Accepted / pending completion` into the highest user-action tier and gives it the same bold presentation as other sessions that require a response; invoke `enable` once to replace the older watcher. Version 0.20.2 restores priority sorting automatically after a Herdr server restart or crash by re-registering the Priority+ Agents view whenever the watcher reconnects; invoke `enable` once to replace the older watcher. Version 0.20.1 replaces the short-lived `🔖` alias with `💤` as the exact emoji alternative to the `LATER` prefix. Version 0.20.0 added emoji parking aliases; `⏳` remains the exact alternative to `WAIT`, and each emoji uses the same inactive rank as its text counterpart. Invoke `enable` once. Version 0.19.1 keeps a published `🙋 Waiting for User Review` gate in the highest rank until its publisher clears the token, except while Herdr reports direct work; blocked and settled sessions keep the gate, while working sessions temporarily use the normal working rank without clearing the token. It also renders active child work as `🤖 Subagent working`. Invoke `enable` once. Version 0.19.0 adds the `⚠ Recovery Review Required` projection for interrupted work that must not be replayed automatically; add the red rule shown above and invoke `enable` once. Version 0.18.1 adds one leading space before each `↳` status marker so the status icon aligns more closely with the Space/tab label above; invoke `enable` once. Version 0.18.0 adds compact Space/tab display tokens, black bold reply-required names, and indented non-bold operational wait rows; replace the old `workspace`/`tab` and `state_text` rows with the example above, then invoke `enable` once. Version 0.17.1 keeps a visible coordinator wait in the dependency-wait tier even during a brief metadata transition that still carries an older user-review token; invoke `enable` once to restart the watcher. Version 0.17.0 moves settled `Waiting for Coordinator` holds into the dependency-wait tier and renders target-aware `coordinator_managed_wait=target:<Tab/Session>` metadata as `⏳ Waiting for <Tab/Session>`; add the dynamic blue rule shown above and invoke `enable` once. Version 0.16.0 projects a settled session's foreign `coordinator_user_review` token as `🙋 Waiting for User Review` in the first tier. Publishers must reserve it for a concrete unanswered user gate that blocks other managed sessions; add the matching teal rule shown above and invoke `enable` once. Version 0.15.0 projects a settled coordinator's foreign `coordinator_managed_wait` token as `⏳ Waiting for Managed Sessions` immediately below directly working sessions; add the matching blue rule shown above and invoke `enable` once. Version 0.14.1 projects the foreign `coordinator_wait_owner` token as `⏳ Waiting for Coordinator` at the lowest settled-session rank; invoke `enable` once to restart the watcher. Version 0.14.0 adopts the Fetch Recovery extension's leased `pica_fetch_recovery` token, recognizes Codex `tunnel_destination_denied`, and standardizes the badge as `⏳ Waiting for Internet`; invoke `enable` once to restart the watcher. Version 0.13.0 added the internet-wait tier for active Pi retries. Add the matching blue rule shown above, then invoke `enable` once to restart the watcher. Version 0.12.1 recovers unanswered idle Pi completions after watcher restarts or upgrades. Version 0.12.0 moves peer and resource-queue waits below every directly working session. Version 0.11.0 added durable resource-queue waits and kept them out of the reply-required completion tier. Version 0.10.0 added pending-interview detection. Add the orange `⚠ Interview Pending` rule shown above, then invoke `enable` once so Priority+ restarts its watcher. Version 0.9.0 added `parallel_wait_target`; keep the dynamic `contains = "⏳ Warte auf "` rule as well. Version 0.8.0 introduced alphabetical tab sorting in every Space. If upgrading from 0.6.1 or earlier, version 0.7.0 also removed the `◉ Awaiting reply` presentation; remove that retired rule. Do not run `cleanup` for these upgrades.
 
 ### 3. Activate Priority+
 
@@ -242,7 +249,7 @@ Transcript inspection is limited to completion recovery, interview detection, an
 - **Space order is user-controlled.** Priority+ mirrors the current visible order inside every Agents tier and never moves Spaces itself. Drag-and-drop changes therefore become the new ordering source immediately, including for LATER/💤, WAIT/⏳, and linked-worktree Spaces.
 - **Session-name sorting is case-insensitive, not locale-aware.** Every tier uses Unicode case folding on displayed tab labels within a Space; Space ordering itself is never alphabetical unless the user arranged it that way.
 - **Single-server support.** Combined multi-machine views are unsupported. Simultaneous clients have not been end-to-end validated.
-- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, `pp_session_sort`, `pp_agent_display`, `pp_reply_display`, or `pp_status_display`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `pica_fetch_recovery`, `parallel_wait_target`, `parallel_wait_resource_ticket`, `parallel_wait_predecessor`, `coordinator_wait_owner`, `coordinator_managed_wait`, `coordinator_user_review`, `coordinator_recovery`, `coordinator_recovery_reason`, and `coordinator_recovery_id` are intentionally foreign metadata owned by their Pi extensions or coordinator; Priority+ reads but never clears them.
+- **Priority+ token keys are reserved:** Herdr stores token keys per pane, not per reporter. Other plugins must not use `pp_rank`, `pp_workspace_sort`, `pp_session_sort`, `pp_agent_display`, `pp_reply_display`, or `pp_status_display`. Version 0.7.0 also clears the retired `pp_context_suppressed` token during migration. `pica_fetch_recovery`, `parallel_wait_target`, `parallel_wait_resource_ticket`, `parallel_wait_predecessor`, `coordinator_wait_owner`, `coordinator_managed_wait`, `coordinator_user_review`, `coordinator_recovery`, `coordinator_recovery_reason`, `coordinator_recovery_id`, `coordinator_recovery_kind`, `coordinator_reconciliation`, `coordinator_reconciliation_reason`, and `coordinator_reconciliation_id` are intentionally foreign metadata owned by their Pi extensions or coordinator; Priority+ reads but never clears them.
 - **Views are shared:** enable/startup can replace another plugin's view. Ordinary hooks never reclaim it; clearing affects only Priority+'s view.
 - **Other idle labels may override the badge.** Cleanup removes only this plugin's label contribution and leaves unrelated tokens alone.
 
@@ -280,7 +287,7 @@ Run the standard-library tests:
 python3 -m unittest discover -s tests -v
 ```
 
-The real-server test is opt-in and currently targets **Herdr 0.9.1**. It uses `herdr` from `PATH`; set `PP_HERDR_BIN` to an absolute executable path to override it:
+The real-server test is opt-in and accepts the supported **Herdr 0.9.1+** range. It uses `herdr` from `PATH`; set `PP_HERDR_BIN` to an absolute executable path to override it:
 
 ```sh
 PP_INTEGRATION=1 python3 -m unittest discover -s tests -v

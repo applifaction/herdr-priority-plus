@@ -40,12 +40,16 @@ COORDINATOR_MANAGED_WAIT_TARGET_PREFIX = "target:"
 COORDINATOR_USER_REVIEW_TOKEN = "coordinator_user_review"
 COORDINATOR_RECOVERY_TOKEN = "coordinator_recovery"
 COORDINATOR_RECOVERY_REASON_TOKEN = "coordinator_recovery_reason"
+COORDINATOR_RECOVERY_KIND_TOKEN = "coordinator_recovery_kind"
+COORDINATOR_RECONCILIATION_TOKEN = "coordinator_reconciliation"
+COORDINATOR_RECONCILIATION_REASON_TOKEN = "coordinator_reconciliation_reason"
+COORDINATOR_RECONCILIATION_ID_TOKEN = "coordinator_reconciliation_id"
 OWNED_TOKENS = (TOKEN, WORKSPACE_TOKEN, SESSION_TOKEN, AGENT_DISPLAY_TOKEN,
                 REPLY_DISPLAY_TOKEN, STATUS_DISPLAY_TOKEN, INTERNET_WAIT_TOKEN,
                 LEGACY_CONTEXT_SUPPRESSION_TOKEN)
 RANK_USER_REVIEW = "9"
-RANK_RECOVERY_REQUIRED = RANK_USER_REVIEW
 RANK_INTERVIEW = "8"
+RANK_RECOVERY_REQUIRED = "7"
 RANK_BLOCKED = "7"
 RANK_PENDING = "6"
 RANK_WORKING = "5"
@@ -59,6 +63,7 @@ RANK_LATER = "2"
 RANK_WAIT = "1"
 RANK_UNKNOWN = "0"
 RANK_COORDINATOR_WAIT = RANK_DEPENDENCY_WAIT
+RANK_RECONCILIATION = RANK_DEPENDENCY_WAIT
 LATER_WORKSPACE_PREFIXES = ("LATER", "💤")
 WAIT_WORKSPACE_PREFIXES = ("WAIT", "⏳")
 LEGACY_PENDING_LABEL = "◉ Awaiting reply"
@@ -70,10 +75,13 @@ COORDINATOR_MANAGED_WAIT_LABEL = "⏳ Waiting for Managed Sessions"
 COORDINATOR_MANAGED_WAIT_LABEL_PREFIX = "⏳ Waiting for "
 COORDINATOR_USER_REVIEW_LABEL = "🙋 Waiting for User Review"
 COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
+COORDINATOR_OPERATION_REVIEW_LABEL = "⚠ Coordinator Operation Review Required"
+COORDINATOR_RESTART_RECOVERY_LABEL = "⚠ Herdr Restart Recovery Failed"
+COORDINATOR_RECONCILIATION_LABEL = "🔄 Reconciling Operation"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.20.5"
+WATCHER_VERSION = "0.21.0"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -696,9 +704,43 @@ def coordinator_recovery(agent):
     return reason[:METADATA_TOKEN_CHAR_LIMIT] or None
 
 
+def coordinator_recovery_kind(agent):
+    tokens = agent.get("tokens") or {}
+    kind = tokens.get(COORDINATOR_RECOVERY_KIND_TOKEN)
+    return kind if kind in ("operation_review", "herdr_restart") else None
+
+
+def recovery_label_for_kind(kind):
+    return {
+        "operation_review": COORDINATOR_OPERATION_REVIEW_LABEL,
+        "herdr_restart": COORDINATOR_RESTART_RECOVERY_LABEL,
+    }.get(kind, COORDINATOR_RECOVERY_LABEL)
+
+
+def coordinator_recovery_label(agent):
+    return recovery_label_for_kind(coordinator_recovery_kind(agent))
+
+
 def coordinator_recovery_is_visible(agent):
     return (coordinator_recovery(agent) is not None
             and agent.get("agent_status") not in ("working", "blocked"))
+
+
+def coordinator_reconciliation(agent):
+    tokens = agent.get("tokens") or {}
+    marker = tokens.get(COORDINATOR_RECONCILIATION_TOKEN)
+    if not isinstance(marker, str) or not marker.strip():
+        return None
+    reason = tokens.get(COORDINATOR_RECONCILIATION_REASON_TOKEN)
+    if not isinstance(reason, str):
+        reason = marker
+    reason = " ".join(reason.split())
+    return reason[:METADATA_TOKEN_CHAR_LIMIT] or None
+
+
+def coordinator_reconciliation_is_visible(agent):
+    return (coordinator_reconciliation(agent) is not None
+            and agent.get("agent_status") != "blocked")
 
 
 def needs_reconcile_event(message):
@@ -721,12 +763,6 @@ def needs_reconcile_event(message):
     if not isinstance(labels, dict):
         labels = {}
     if labels.get("idle") == LEGACY_PENDING_LABEL:
-        return True
-    if coordinator_recovery_is_visible(pane):
-        return (tokens.get(TOKEN) != RANK_RECOVERY_REQUIRED
-                or any(labels.get(status) != COORDINATOR_RECOVERY_LABEL
-                       for status in SUBAGENT_STATES))
-    if any(label == COORDINATOR_RECOVERY_LABEL for label in labels.values()):
         return True
     interview_visible = (tokens.get(TOKEN) == RANK_INTERVIEW
                          or any(label == INTERVIEW_LABEL for label in labels.values()))
@@ -793,6 +829,26 @@ def needs_reconcile_event(message):
             and tokens.get(TOKEN) == RANK_USER_REVIEW):
         return True
     if any(label == COORDINATOR_USER_REVIEW_LABEL for label in labels.values()):
+        return True
+    if coordinator_recovery_is_visible(pane):
+        recovery_label = coordinator_recovery_label(pane)
+        return (tokens.get(TOKEN) != RANK_RECOVERY_REQUIRED
+                or any(labels.get(status) != recovery_label
+                       for status in SUBAGENT_STATES))
+    recovery_labels = (
+        COORDINATOR_RECOVERY_LABEL,
+        COORDINATOR_OPERATION_REVIEW_LABEL,
+        COORDINATOR_RESTART_RECOVERY_LABEL,
+    )
+    if any(label in recovery_labels for label in labels.values()):
+        return True
+    if coordinator_reconciliation_is_visible(pane):
+        expected_rank = (RANK_WORKING if pane.get("agent_status") == "working"
+                         else RANK_RECONCILIATION)
+        return (tokens.get(TOKEN) != expected_rank
+                or any(labels.get(status) != COORDINATOR_RECONCILIATION_LABEL
+                       for status in SUBAGENT_STATES))
+    if any(label == COORDINATOR_RECONCILIATION_LABEL for label in labels.values()):
         return True
     if has_active_subagents(pane):
         return (tokens.get(TOKEN) != RANK_SUBAGENT
@@ -930,6 +986,8 @@ def observe(agent, previous=None, parking=None, active_sessions=None, interview_
             "coordinator_managed_wait": coordinator_managed_wait(agent),
             "coordinator_user_review": coordinator_user_review(agent),
             "coordinator_recovery": coordinator_recovery(agent),
+            "coordinator_recovery_kind": coordinator_recovery_kind(agent),
+            "coordinator_reconciliation": coordinator_reconciliation(agent),
             "interview": session_path in (interview_sessions or ()),
             "internet_wait": (internet_recovery
                               or session_path in (internet_waits or ())),
@@ -983,20 +1041,22 @@ def rank(record):
         return RANK_BLOCKED
     if record["status"] == "working":
         return RANK_WORKING
-    # A recovery review outranks all settled coordination states. Active work
-    # and blockers still win so a resumed turn is never presented as idle.
-    if record.get("coordinator_recovery"):
-        return RANK_RECOVERY_REQUIRED
-    # Coordinator waits share the dependency-wait tier: below direct work and
-    # above ordinary idle/LATER/WAIT sessions. Wait metadata still wins during
-    # a publisher's brief overlap with ordinary user-review metadata.
+    # The current owner projection outranks latent safety metadata. A settled
+    # source waiting on its coordinator therefore stays in the operational
+    # dependency tier instead of looking like a user decision.
     if record.get("coordinator_wait"):
         return RANK_COORDINATOR_WAIT
-    # A coordinator waiting on managed sessions uses the same tier.
     if record.get("coordinator_managed_wait"):
         return RANK_COORDINATOR_MANAGED_WAIT
     if record.get("coordinator_accepted_completion"):
         return RANK_ACCEPTED_COMPLETION
+    # An unowned manual review is an internal blocker, not a user-action tier.
+    if record.get("coordinator_recovery"):
+        return RANK_RECOVERY_REQUIRED
+    # Automated reconciliation shares the operational-wait tier below direct
+    # work and above ordinary idle/LATER/WAIT sessions.
+    if record.get("coordinator_reconciliation"):
+        return RANK_RECONCILIATION
     # Explicit coordinator waits above deliberately consumed an overlapping
     # review token. A remaining review token was already returned before the
     # generic working/blocked lifecycle ranks.
@@ -1019,17 +1079,12 @@ def presentation_label(record):
         return INTERNET_WAIT_LABEL
     if record.get("parallel_wait"):
         return parallel_wait_label(record["parallel_wait"])
-    if (record.get("coordinator_recovery")
-            and record["status"] not in ("working", "blocked")):
-        return COORDINATOR_RECOVERY_LABEL
     if (record.get("coordinator_wait")
             and record["status"] not in ("working", "blocked")):
         return COORDINATOR_WAIT_LABEL
     if (record.get("coordinator_managed_wait")
             and record["status"] not in ("working", "blocked")):
         return coordinator_managed_wait_label(record["coordinator_managed_wait"])
-    if record.get("subagent"):
-        return SUBAGENT_LABEL
     if (record.get("coordinator_user_review")
             and record["status"] != "working"
             and not record.get("coordinator_wait")
@@ -1038,6 +1093,14 @@ def presentation_label(record):
     if (record.get("coordinator_accepted_completion")
             and record["status"] not in ("working", "blocked")):
         return ACCEPTED_COMPLETION_LABEL
+    if (record.get("coordinator_recovery")
+            and record["status"] not in ("working", "blocked")):
+        return recovery_label_for_kind(record.get("coordinator_recovery_kind"))
+    if (record.get("coordinator_reconciliation")
+            and record["status"] != "blocked"):
+        return COORDINATOR_RECONCILIATION_LABEL
+    if record.get("subagent"):
+        return SUBAGENT_LABEL
     return False
 
 

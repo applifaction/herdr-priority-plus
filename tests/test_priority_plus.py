@@ -81,6 +81,9 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.COORDINATOR_WAIT_LABEL, "⏳ Waiting for Coordinator")
         self.assertEqual(pp.COORDINATOR_MANAGED_WAIT_LABEL, "⏳ Waiting for Managed Sessions")
         self.assertEqual(pp.COORDINATOR_MANAGED_WAIT_LABEL_PREFIX, "⏳ Waiting for ")
+        self.assertEqual(pp.COORDINATOR_RECONCILIATION_LABEL, "🔄 Reconciling Operation")
+        self.assertEqual(pp.COORDINATOR_OPERATION_REVIEW_LABEL, "⚠ Coordinator Operation Review Required")
+        self.assertEqual(pp.COORDINATOR_RESTART_RECOVERY_LABEL, "⚠ Herdr Restart Recovery Failed")
         self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for Internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
 
@@ -783,6 +786,39 @@ class WatcherTests(unittest.TestCase):
             state_labels={"idle": pp.COORDINATOR_USER_REVIEW_LABEL},
         )
         self.assertTrue(pp.needs_reconcile_event(removed))
+
+    def test_operation_reconciliation_and_recovery_edges_require_reconciliation(self):
+        reconciling = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_RECONCILIATION_TOKEN: "active",
+                    pp.TOKEN: pp.RANK_RECONCILIATION},
+            state_labels={state: pp.COORDINATOR_RECONCILIATION_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(reconciling))
+
+        reconciling["data"]["pane"]["agent_status"] = "working"
+        self.assertTrue(pp.needs_reconcile_event(reconciling))
+        reconciling["data"]["pane"]["tokens"][pp.TOKEN] = pp.RANK_WORKING
+        self.assertFalse(pp.needs_reconcile_event(reconciling))
+
+        review = self.pane_event(
+            agent_status="idle",
+            tokens={pp.COORDINATOR_RECOVERY_TOKEN: "required",
+                    pp.COORDINATOR_RECOVERY_KIND_TOKEN: "operation_review",
+                    pp.TOKEN: pp.RANK_RECOVERY_REQUIRED},
+            state_labels={state: pp.COORDINATOR_OPERATION_REVIEW_LABEL
+                          for state in pp.SUBAGENT_STATES},
+        )
+        self.assertFalse(pp.needs_reconcile_event(review))
+
+        review["data"]["pane"]["tokens"][pp.COORDINATOR_WAIT_OWNER_TOKEN] = "w1:pC"
+        self.assertTrue(pp.needs_reconcile_event(review))
+        review["data"]["pane"]["tokens"][pp.TOKEN] = pp.RANK_COORDINATOR_WAIT
+        review["data"]["pane"]["state_labels"] = {
+            state: pp.COORDINATOR_WAIT_LABEL for state in pp.SUBAGENT_STATES
+        }
+        self.assertFalse(pp.needs_reconcile_event(review))
 
     def test_parallel_wait_metadata_edges_require_reconciliation(self):
         wait_label = pp.parallel_wait_label("history & release")
@@ -1517,41 +1553,87 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
-    def test_recovery_review_outranks_settled_coordination_without_hiding_active_work(self):
+    def test_operation_reconciliation_sits_with_operational_waits_and_below_working(self):
         self.client.agents[0] = agent(
             "idle", 1,
-            tokens={pp.COORDINATOR_RECOVERY_TOKEN: "required",
-                    pp.COORDINATOR_RECOVERY_REASON_TOKEN: "remote write outcome unknown",
-                    pp.COORDINATOR_MANAGED_WAIT_TOKEN: "target:release evidence",
-                    pp.COORDINATOR_USER_REVIEW_TOKEN: "approval",
+            tokens={pp.COORDINATOR_RECONCILIATION_TOKEN: "active",
+                    pp.COORDINATOR_RECONCILIATION_REASON_TOKEN: "verify exact runner resources",
                     pp.TOKEN: pp.RANK_IDLE},
         )
         self.sync()
         current = self.client.agents[0]
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_RECOVERY_REQUIRED)
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_RECONCILIATION)
+        self.assertLess(pp.RANK_RECONCILIATION, pp.RANK_WORKING)
+        self.assertGreater(pp.RANK_RECONCILIATION, pp.RANK_IDLE)
         self.assertEqual(current["state_labels"], {
-            state: pp.COORDINATOR_RECOVERY_LABEL for state in pp.SUBAGENT_STATES
+            state: pp.COORDINATOR_RECONCILIATION_LABEL for state in pp.SUBAGENT_STATES
         })
-        self.assertEqual(
-            self.state["agents"]["term-1"]["coordinator_recovery"],
-            "remote write outcome unknown",
-        )
 
         current["agent_status"] = "working"
         current["state_change_seq"] = 2
         self.client.calls.clear()
         self.sync()
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
-        self.assertNotIn("state_labels", current)
+        self.assertEqual(current["state_labels"]["working"], pp.COORDINATOR_RECONCILIATION_LABEL)
 
-        current["agent_status"] = "idle"
-        current["state_change_seq"] = 3
-        current["tokens"].pop(pp.COORDINATOR_RECOVERY_TOKEN)
-        current["tokens"].pop(pp.COORDINATOR_RECOVERY_REASON_TOKEN)
+    def test_current_owner_wait_outranks_latent_manual_operation_review(self):
+        self.client.agents[0] = agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_RECOVERY_TOKEN: "required",
+                    pp.COORDINATOR_RECOVERY_KIND_TOKEN: "operation_review",
+                    pp.COORDINATOR_RECOVERY_REASON_TOKEN: "remote write outcome unknown",
+                    pp.COORDINATOR_MANAGED_WAIT_TOKEN: "target:release evidence",
+                    pp.TOKEN: pp.RANK_IDLE},
+        )
+        self.sync()
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_MANAGED_WAIT)
+        self.assertEqual(current["state_labels"], {
+            state: "⏳ Waiting for release evidence" for state in pp.SUBAGENT_STATES
+        })
+        self.assertEqual(
+            self.state["agents"]["term-1"]["coordinator_recovery"],
+            "remote write outcome unknown",
+        )
+
+        current["tokens"].pop(pp.COORDINATOR_MANAGED_WAIT_TOKEN)
+        current["tokens"][pp.COORDINATOR_USER_REVIEW_TOKEN] = "choose a destructive fallback"
+        current["state_change_seq"] = 2
         self.client.calls.clear()
         self.sync()
-        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_COORDINATOR_MANAGED_WAIT)
-        self.assertEqual(current["state_labels"]["idle"], "⏳ Waiting for release evidence")
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_USER_REVIEW)
+        self.assertEqual(current["state_labels"]["idle"], pp.COORDINATOR_USER_REVIEW_LABEL)
+
+        current["tokens"].pop(pp.COORDINATOR_USER_REVIEW_TOKEN)
+        current["state_change_seq"] = 3
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_RECOVERY_REQUIRED)
+        self.assertEqual(current["state_labels"]["idle"], pp.COORDINATOR_OPERATION_REVIEW_LABEL)
+        self.assertLess(pp.RANK_RECOVERY_REQUIRED, pp.RANK_INTERVIEW)
+        self.assertGreater(pp.RANK_RECOVERY_REQUIRED, pp.RANK_PENDING)
+
+        current["agent_status"] = "working"
+        current["state_change_seq"] = 4
+        self.client.calls.clear()
+        self.sync()
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_WORKING)
+        self.assertNotIn("state_labels", current)
+
+    def test_restart_recovery_and_legacy_recovery_use_distinct_labels(self):
+        restart = pp.observe(agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_RECOVERY_TOKEN: "required",
+                    pp.COORDINATOR_RECOVERY_KIND_TOKEN: "herdr_restart",
+                    pp.COORDINATOR_RECOVERY_REASON_TOKEN: "prompt failed"},
+        ))
+        legacy = pp.observe(agent(
+            "idle", 1,
+            tokens={pp.COORDINATOR_RECOVERY_TOKEN: "required",
+                    pp.COORDINATOR_RECOVERY_REASON_TOKEN: "unknown legacy recovery"},
+        ))
+        self.assertEqual(pp.presentation_label(restart), pp.COORDINATOR_RESTART_RECOVERY_LABEL)
+        self.assertEqual(pp.presentation_label(legacy), pp.COORDINATOR_RECOVERY_LABEL)
 
     def test_user_review_sorts_first_only_while_not_working(self):
         self.client.agents[0] = agent(
@@ -2074,7 +2156,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.20.5")
+        self.assertEqual(manifest["version"], "0.21.0")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

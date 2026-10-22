@@ -1,6 +1,7 @@
-"""Opt-in real Herdr 0.9.1 tests; never use an inherited socket or HOME."""
+"""Opt-in real Herdr 0.9.1+ tests; never use an inherited socket or HOME."""
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -34,6 +35,8 @@ class RealHerdrTests(unittest.TestCase):
                               '  ["state_icon", { token = "$pp_reply_display", fg = "#000000", '
                               'bold = true }, "$pp_agent_display"],\n'
                               '  [{ token = "$pp_status_display", rules = ['
+                              '{ contains = "Operation Review Required", fg = "#dc322f", bold = true }, '
+                              '{ contains = "Restart Recovery Failed", fg = "#dc322f", bold = true }, '
                               '{ contains = "Waiting for User Review", fg = "#000000", bold = true }, '
                               '{ contains = "Interview Pending", fg = "#cb4b16", bold = true }, '
                               '{ contains = "", fg = "#268bd2", bold = false }] }],\n]\n')
@@ -42,7 +45,9 @@ class RealHerdrTests(unittest.TestCase):
                        HERDR_CONFIG_PATH=str(config), SHELL="/bin/sh", TERM="xterm-256color")
             version = subprocess.run([BINARY, "--version"], env=env, cwd=base,
                                      capture_output=True, text=True, check=True, timeout=10)
-            self.assertIn("0.9.1", version.stdout)
+            match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version.stdout)
+            self.assertIsNotNone(match, version.stdout)
+            self.assertGreaterEqual(tuple(map(int, match.groups())), (0, 9, 1))
             evidence.append(version.stdout.strip())
             # Offline link, so the actual manifest startup hook is exercised.
             linked = subprocess.run([BINARY, "plugin", "link", str(ROOT)], env=env, cwd=base,
@@ -283,7 +288,7 @@ class RealHerdrTests(unittest.TestCase):
                          pp.LEGACY_PENDING_LABEL, "returning to WAIT has no pending label")
                     evidence.append("WAIT workspace keeps pending history but presents reviewed sessions as ordinary idle")
                     report(later, "working")
-                    expect_rank(later, "5")
+                    expect_rank(later, "2")
                     report(later, "idle")
                     expect_rank(later, "2")
                     call("pane.focus", pane_id=later)
@@ -302,7 +307,7 @@ class RealHerdrTests(unittest.TestCase):
                          pp.LEGACY_PENDING_LABEL, "returning to LATER has no pending label")
                     wait(lambda: workspace_labels() == expected_workspace_order,
                          "renamed LATER keeps its user-selected position")
-                    evidence.append("LATER matches WAIT agent parking without changing Space position")
+                    evidence.append("LATER remains authoritative during work and never changes Space position")
                     call("pane.focus", pane_id=background)
                     wait(lambda: get(background)["agent_status"] == "idle", "focus native review")
                     call("pane.send_text", pane_id=background, text="draft-not-submitted")
