@@ -225,16 +225,31 @@ class LifecycleTests(unittest.TestCase):
                 self.assertFalse(pp.is_later_workspace(label))
                 self.assertFalse(pp.is_parked_workspace(label))
 
-    def test_wait_and_later_workspaces_keep_active_states_visible(self):
+    def test_later_workspace_overrides_status_and_presentation(self):
+        for status in ("idle", "working", "blocked", "done", "unknown"):
+            with self.subTest(status=status):
+                later = pp.observe(agent(status), parking="later")
+                self.assertEqual(pp.rank(later), pp.RANK_LATER)
+                self.assertFalse(pp.presentation_label(later))
+
+        active = pp.observe(
+            agent("done", tokens={"summary": "⏳ 1 subagent"}), parking="later")
+        self.assertEqual(pp.rank(active), pp.RANK_LATER)
+        self.assertFalse(pp.presentation_label(active))
+
+        review = pp.observe(
+            agent("idle", tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "approval"}),
+            parking="later",
+        )
+        self.assertEqual(pp.rank(review), pp.RANK_LATER)
+        self.assertFalse(pp.presentation_label(review))
+
+    def test_wait_workspace_keeps_active_states_visible(self):
         for status in ("working", "blocked"):
             with self.subTest(status=status):
                 normal = pp.observe(agent(status))
-                later = pp.observe(agent(status), parking="later")
                 waiting = pp.observe(agent(status), parking="wait")
-                self.assertEqual(pp.rank(normal), pp.rank(later))
                 self.assertEqual(pp.rank(normal), pp.rank(waiting))
-        active = pp.observe(agent("done", tokens={"summary": "⏳ 1 subagent"}), parking="later")
-        self.assertEqual(pp.rank(active), "4")
 
     def test_inactive_agent_order_is_normal_then_later_then_wait(self):
         normal = pp.observe(agent("idle"))
@@ -1670,6 +1685,41 @@ class ReconciliationTests(unittest.TestCase):
                 self.assertEqual(self.client.agents[0]["tokens"][pp.TOKEN], "6")
                 self.assertNotIn("state_labels", self.client.agents[0])
 
+    def test_later_workspace_overrides_review_rank_and_hides_status(self):
+        self.client.workspaces = [{"workspace_id": "later", "label": "💤🌐"}]
+        self.client.tabs = [{"tab_id": "later:t1", "label": "Homepage-Product-Collection"}]
+        self.client.agents[0] = agent(
+            "idle",
+            workspace_id="later",
+            tab_id="later:t1",
+            tokens={
+                pp.COORDINATOR_USER_REVIEW_TOKEN: "approval",
+                pp.TOKEN: pp.RANK_USER_REVIEW,
+                pp.REPLY_DISPLAY_TOKEN: "💤🌐 Homepage-Product-Collection",
+                pp.STATUS_DISPLAY_TOKEN: pp.status_display_label(
+                    pp.COORDINATOR_USER_REVIEW_LABEL),
+            },
+            state_labels={
+                state: pp.COORDINATOR_USER_REVIEW_LABEL for state in pp.SUBAGENT_STATES
+            },
+        )
+
+        self.sync()
+
+        current = self.client.agents[0]
+        self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_LATER)
+        self.assertEqual(
+            current["tokens"][pp.AGENT_DISPLAY_TOKEN],
+            "💤🌐 Homepage-Product-Collection",
+        )
+        self.assertNotIn(pp.REPLY_DISPLAY_TOKEN, current["tokens"])
+        self.assertNotIn(pp.STATUS_DISPLAY_TOKEN, current["tokens"])
+        self.assertNotIn("state_labels", current)
+        self.assertEqual(
+            self.state["agents"]["term-1"]["coordinator_user_review"],
+            "approval",
+        )
+
     def test_all_ranks_follow_workspace_order_and_tab_name(self):
         self.client.workspaces = [
             {"workspace_id": "z-first", "label": "Zulu first"},
@@ -1825,17 +1875,16 @@ class ReconciliationTests(unittest.TestCase):
             pp.AGENT_DISPLAY_TOKEN: "Main Normal",
         })
         self.assertEqual(by_terminal["later-working"]["tokens"], {
-            pp.TOKEN: "5", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "working",
+            pp.TOKEN: "2", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "working",
             pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Working",
         })
         self.assertEqual(by_terminal["later-blocked"]["tokens"], {
-            pp.TOKEN: "7", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "blocked",
-            pp.REPLY_DISPLAY_TOKEN: "LATER/alpha Blocked",
+            pp.TOKEN: "2", pp.WORKSPACE_TOKEN: later_a_key, pp.SESSION_TOKEN: "blocked",
+            pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Blocked",
         })
         self.assertEqual(by_terminal["later-subagent"]["tokens"], {
-            "summary": "⏳ 1 subagent", pp.TOKEN: "4", pp.WORKSPACE_TOKEN: later_a_key,
+            "summary": "⏳ 1 subagent", pp.TOKEN: "2", pp.WORKSPACE_TOKEN: later_a_key,
             pp.SESSION_TOKEN: "subagent", pp.AGENT_DISPLAY_TOKEN: "LATER/alpha Subagent",
-            pp.STATUS_DISPLAY_TOKEN: pp.STATUS_INDENT + "↳ 🤖 Subagent working",
         })
         self.assertEqual(by_terminal["later-missing-tab"]["tokens"], {
             pp.TOKEN: "2", "pp_workspace_sort": later_a_key,
@@ -2025,7 +2074,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.20.3")
+        self.assertEqual(manifest["version"], "0.20.4")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

@@ -73,7 +73,7 @@ COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.20.3"
+WATCHER_VERSION = "0.20.4"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -957,6 +957,10 @@ def is_reply_required_rank(value):
 
 
 def rank(record):
+    # Moving a session into LATER is an explicit shelving decision. It overrides
+    # every live/status projection until the Space label changes again.
+    if record.get("parking") == "later":
+        return RANK_LATER
     if record.get("interview"):
         return RANK_INTERVIEW
     if record.get("internet_wait"):
@@ -996,8 +1000,6 @@ def rank(record):
     # Explicit coordinator waits above deliberately consumed an overlapping
     # review token. A remaining review token was already returned before the
     # generic working/blocked lifecycle ranks.
-    if record.get("parking") == "later":
-        return RANK_LATER
     if record.get("parking") == "wait":
         return RANK_WAIT
     if record["pending"]:
@@ -1007,6 +1009,10 @@ def rank(record):
 
 def presentation_label(record):
     """Resolve the one supplemental label Priority+ owns for this record."""
+    # Shelved sessions are intentionally quiet in the Agents view. Keep the
+    # underlying metadata so its status returns when the Space is unparked.
+    if record.get("parking") == "later":
+        return False
     if record.get("interview"):
         return INTERVIEW_LABEL
     if record.get("internet_wait"):
