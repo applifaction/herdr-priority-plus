@@ -326,6 +326,60 @@ class RealHerdrTests(unittest.TestCase):
                     self.assertNotEqual(get(background).get("state_labels", {}).get("idle"),
                                         pp.LEGACY_PENDING_LABEL)
                     evidence.append("pane move preserves completion by terminal identity")
+
+                    projection = fixture("recovery-projections")
+                    report(projection, "idle")
+                    expect_rank(projection, pp.RANK_IDLE)
+                    call("pane.report_metadata", pane_id=projection, source="test:coordinator",
+                         tokens={pp.COORDINATOR_RECONCILIATION_TOKEN: "active",
+                                 pp.COORDINATOR_RECONCILIATION_REASON_TOKEN: "exact run",
+                                 pp.COORDINATOR_RECONCILIATION_ID_TOKEN: "run-42"})
+                    expect_rank(projection, pp.RANK_RECONCILIATION)
+                    wait(lambda: get(projection).get("state_labels", {}).get("idle") ==
+                         pp.COORDINATOR_RECONCILIATION_LABEL,
+                         "settled operation reconciliation label")
+                    report(projection, "working")
+                    expect_rank(projection, pp.RANK_WORKING)
+                    wait(lambda: get(projection).get("state_labels", {}).get("working") ==
+                         pp.COORDINATOR_RECONCILIATION_LABEL,
+                         "active operation reconciliation label")
+                    report(projection, "idle")
+                    expect_rank(projection, pp.RANK_RECONCILIATION)
+                    call("pane.report_metadata", pane_id=projection, source="test:coordinator",
+                         tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: "w1:pC"})
+                    expect_rank(projection, pp.RANK_COORDINATOR_WAIT)
+                    wait(lambda: get(projection).get("state_labels", {}).get("idle") ==
+                         pp.COORDINATOR_WAIT_LABEL,
+                         "current coordinator owner overrides reconciliation")
+                    call("pane.report_metadata", pane_id=projection, source="test:coordinator",
+                         tokens={pp.COORDINATOR_WAIT_OWNER_TOKEN: None,
+                                 pp.COORDINATOR_RECONCILIATION_TOKEN: None,
+                                 pp.COORDINATOR_RECONCILIATION_REASON_TOKEN: None,
+                                 pp.COORDINATOR_RECONCILIATION_ID_TOKEN: None,
+                                 pp.COORDINATOR_RECOVERY_TOKEN: "required",
+                                 pp.COORDINATOR_RECOVERY_KIND_TOKEN: "operation_review"})
+                    expect_rank(projection, pp.RANK_RECOVERY_REQUIRED)
+                    wait(lambda: get(projection).get("state_labels", {}).get("idle") ==
+                         pp.COORDINATOR_OPERATION_REVIEW_LABEL,
+                         "coordinator-owned operation review label")
+                    call("pane.report_metadata", pane_id=projection, source="test:coordinator",
+                         tokens={pp.COORDINATOR_RECOVERY_KIND_TOKEN: "herdr_restart"})
+                    wait(lambda: get(projection).get("state_labels", {}).get("idle") ==
+                         pp.COORDINATOR_RESTART_RECOVERY_LABEL,
+                         "Herdr restart recovery failure label")
+                    call("pane.report_metadata", pane_id=projection, source="test:coordinator",
+                         tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: "choose fallback"})
+                    expect_rank(projection, pp.RANK_USER_REVIEW)
+                    wait(lambda: get(projection).get("state_labels", {}).get("idle") ==
+                         pp.COORDINATOR_USER_REVIEW_LABEL,
+                         "actual user gate outranks internal recovery")
+                    call("pane.report_metadata", pane_id=projection, source="test:coordinator",
+                         clear_state_labels=True,
+                         tokens={pp.COORDINATOR_USER_REVIEW_TOKEN: None,
+                                 pp.COORDINATOR_RECOVERY_TOKEN: None,
+                                 pp.COORDINATOR_RECOVERY_KIND_TOKEN: None})
+                    evidence.append("reconciliation, coordinator ownership, restart failure, and user gates occupy distinct tiers")
+
                     # Other plugins' views are not reclaimed by sync or cleared by disable.
                     call("agent.view.set", source="test:foreign", label="foreign", sort=[])
                     report(working, "blocked")
@@ -367,7 +421,8 @@ class RealHerdrTests(unittest.TestCase):
                     evidence.append("all manifest hooks converged without failures")
                     action("cleanup")
                     for pane in (focused, background, blocked, plain, working, subagent,
-                                 waiting, later, waiting_alpha, later_alpha, later_alpha_second):
+                                 waiting, later, waiting_alpha, later_alpha, later_alpha_second,
+                                 projection):
                         self.assertTrue(set(pp.OWNED_TOKENS).isdisjoint(get(pane).get("tokens", {})))
                         self.assertNotEqual(get(pane).get("state_labels", {}).get("idle"),
                                             pp.LEGACY_PENDING_LABEL)
