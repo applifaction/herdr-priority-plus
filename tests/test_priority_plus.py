@@ -312,7 +312,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("filter", pp.VIEW)
         self.assertEqual(pp.VIEW["sort"], [
             {"field": {"token": "pp_rank"}, "order": "desc"},
-            {"field": {"token": "pp_workspace_sort"}, "order": "asc"},
+            {"field": "workspace_order", "order": "asc"},
             {"field": {"token": "pp_session_sort"}, "order": "asc"},
             {"field": "seen", "order": "asc"},
             {"field": "state_change_seq", "order": "desc"}])
@@ -2074,7 +2074,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.20.4")
+        self.assertEqual(manifest["version"], "0.20.5")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

@@ -73,7 +73,7 @@ COORDINATOR_RECOVERY_LABEL = "⚠ Recovery Review Required"
 INTERNET_WAIT_LABEL = "⏳ Waiting for Internet"
 INTERVIEW_LABEL = "⚠ Interview Pending"
 WATCH_REQUEST_ID = SOURCE + ":watch"
-WATCHER_VERSION = "0.20.4"
+WATCHER_VERSION = "0.20.5"
 WATCH_TICK_SECONDS = 2
 WATCH_FULL_RECONCILE_SECONDS = 30
 SUBAGENT_STATUS_LIMIT = 1024 * 1024
@@ -102,7 +102,7 @@ VIEW = {
     "label": "Priority+",
     "sort": [
         {"field": {"token": TOKEN}, "order": "desc"},
-        {"field": {"token": WORKSPACE_TOKEN}, "order": "asc"},
+        {"field": "workspace_order", "order": "asc"},
         {"field": {"token": SESSION_TOKEN}, "order": "asc"},
         {"field": "seen", "order": "asc"},
         {"field": "state_change_seq", "order": "desc"},

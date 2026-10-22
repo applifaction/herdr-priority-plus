@@ -223,7 +223,7 @@ rows = [
             else:
                 rpc('agent.view.set', {'source': 'test:priority-plus', 'label': 'Priority+', 'sort': [
                     {'field': {'token': 'pp_rank'}, 'order': 'desc'},
-                    {'field': {'token': 'pp_workspace_sort'}, 'order': 'asc'},
+                    {'field': 'workspace_order', 'order': 'asc'},
                     {'field': {'token': 'pp_session_sort'}, 'order': 'asc'},
                     {'field': 'seen', 'order': 'asc'},
                     {'field': 'state_change_seq', 'order': 'desc'},
