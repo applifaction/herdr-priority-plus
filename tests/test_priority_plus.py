@@ -1374,7 +1374,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_PENDING)
         self.assertNotIn("state_labels", current)
 
-    def test_accepted_completion_projects_only_while_settled_and_is_not_reply_required(self):
+    def test_accepted_completion_projects_only_while_settled_and_is_reply_required(self):
         self.client.agents[0] = agent(
             "idle", 1,
             tokens={pp.COORDINATOR_ACCEPTED_COMPLETION_TOKEN: "w61:pG",
@@ -1383,8 +1383,8 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         current = self.client.agents[0]
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_ACCEPTED_COMPLETION)
-        self.assertEqual(pp.RANK_ACCEPTED_COMPLETION, pp.RANK_IDLE)
-        self.assertFalse(pp.is_reply_required_rank(pp.RANK_ACCEPTED_COMPLETION))
+        self.assertEqual(pp.RANK_ACCEPTED_COMPLETION, pp.RANK_USER_REVIEW)
+        self.assertTrue(pp.is_reply_required_rank(pp.RANK_ACCEPTED_COMPLETION))
         self.assertEqual(current["state_labels"], {
             state: pp.ACCEPTED_COMPLETION_LABEL for state in pp.SUBAGENT_STATES
         })
@@ -2025,7 +2025,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.20.2")
+        self.assertEqual(manifest["version"], "0.20.3")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)

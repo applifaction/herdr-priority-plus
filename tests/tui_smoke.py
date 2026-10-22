@@ -46,6 +46,7 @@ rows = [
   ["state_icon", { token = "$pp_reply_display", fg = "#000000", bold = true }, "$pp_agent_display"],
   [{ token = "$pp_status_display", rules = [
     { contains = "Waiting for User Review", fg = "#000000", bold = true },
+    { contains = "Accepted / pending completion", fg = "#000000", bold = true },
     { contains = "Interview Pending", fg = "#cb4b16", bold = true },
     { contains = "", fg = "#268bd2", bold = false },
   ] }],
