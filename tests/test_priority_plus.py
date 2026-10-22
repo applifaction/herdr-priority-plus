@@ -86,6 +86,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(pp.COORDINATOR_RESTART_RECOVERY_LABEL, "⚠ Herdr Restart Recovery Failed")
         self.assertEqual(pp.INTERNET_WAIT_LABEL, "⏳ Waiting for Internet")
         self.assertEqual(pp.INTERVIEW_LABEL, "⚠ Interview Pending")
+        for token in (
+            pp.COORDINATOR_RECOVERY_KIND_TOKEN,
+            pp.COORDINATOR_RECONCILIATION_TOKEN,
+            pp.COORDINATOR_RECONCILIATION_REASON_TOKEN,
+            pp.COORDINATOR_RECONCILIATION_ID_TOKEN,
+        ):
+            self.assertLessEqual(len(token), 32, token)
 
     def test_sidebar_display_helpers_make_hierarchy_explicit(self):
         self.assertEqual(
@@ -2156,7 +2163,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.21.0")
+        self.assertEqual(manifest["version"], "0.21.1")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
