@@ -110,6 +110,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(pp.is_reply_required_rank(pp.RANK_PENDING))
         self.assertFalse(pp.is_reply_required_rank(pp.RANK_WORKING))
         self.assertFalse(pp.is_reply_required_rank(pp.RANK_DEPENDENCY_WAIT))
+        self.assertFalse(pp.is_reply_required_rank(pp.RANK_RECOVERY_REQUIRED))
 
     def test_bootstrap_and_all_ranks(self):
         expected = {"blocked": "7", "done": "6", "working": "5", "idle": "3", "unknown": "0"}
@@ -1617,8 +1618,9 @@ class ReconciliationTests(unittest.TestCase):
         self.sync()
         self.assertEqual(current["tokens"][pp.TOKEN], pp.RANK_RECOVERY_REQUIRED)
         self.assertEqual(current["state_labels"]["idle"], pp.COORDINATOR_OPERATION_REVIEW_LABEL)
-        self.assertLess(pp.RANK_RECOVERY_REQUIRED, pp.RANK_INTERVIEW)
-        self.assertGreater(pp.RANK_RECOVERY_REQUIRED, pp.RANK_PENDING)
+        self.assertEqual(pp.RANK_RECOVERY_REQUIRED, pp.RANK_DEPENDENCY_WAIT)
+        self.assertLess(pp.RANK_RECOVERY_REQUIRED, pp.RANK_WORKING)
+        self.assertGreater(pp.RANK_RECOVERY_REQUIRED, pp.RANK_IDLE)
 
         current["agent_status"] = "working"
         current["state_change_seq"] = 4
@@ -2163,7 +2165,7 @@ class SocketTests(unittest.TestCase):
             {a["id"] for a in manifest["actions"]},
             {"enable", "disable", "toggle", "refresh", "cleanup"},
         )
-        self.assertEqual(manifest["version"], "0.21.1")
+        self.assertEqual(manifest["version"], "0.21.2")
         hooks = {e["on"] for e in manifest["events"]}
         self.assertIn("pane.agent_status_changed", hooks)
         self.assertIn("tab.moved", hooks)
